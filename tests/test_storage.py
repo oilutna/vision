@@ -78,6 +78,19 @@ class StorageTests(unittest.TestCase):
         self.assertIsNone(b['validation'])
         self.store.integrity(b,True)
 
+    def test_photo_details_survive_model_export_import(self):
+        m=add_samples(self.store,make_model(self.store),n=1)
+        c=copy.deepcopy(m['config'])
+        c['references'][0].update(piece_id='REFERENCIA-A',note='Variación nominal permitida')
+        c['samples'][1].update(defect_type='Conector invertido',note='Lado derecho')
+        m=self.store.save(m['id'],c)
+        path=Path(self.temp.name)/'con_detalles.zip'
+        self.store.export_model(m['id'],path)
+        imported=self.store.import_model(path,'COPIA-CON-DETALLES')
+        self.assertEqual(imported['config']['samples'][1]['defect_type'],'Conector invertido')
+        self.assertEqual(imported['config']['samples'][1]['note'],'Lado derecho')
+        self.assertEqual(imported['config']['references'][0]['piece_id'],'REFERENCIA-A')
+
     def test_import_rejects_path_traversal(self):
         target=Path(self.temp.name)/'malicioso.zip'
         with zipfile.ZipFile(target,'w') as z:

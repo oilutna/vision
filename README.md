@@ -1,6 +1,6 @@
 # Poka-Yoke 5
 
-Versión **5.0.1**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. El programa completo está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.1.0**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. El programa completo está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
 
 ## Ejecutar
 
@@ -22,6 +22,22 @@ El botón **Abrir / reconectar cámara** está visible en la parte superior. Si 
 En Windows, si un controlador abre el dispositivo pero no entrega imágenes, se intentan otras opciones de captura. Se espera el primer cuadro válido antes de mostrar la cámara como lista. El estado inferior informa el resultado; un fallo de lectura permite reconectar sin cerrar el programa.
 
 Para actualizar desde 5.0, cierra la aplicación y reemplaza únicamente `poka_yoke_mejorado5.py`, conservando tu carpeta `datos`.
+
+## Capturar OK y NG con la cámara visible
+
+En **Administración → Configuración del modelo**, la cámara permanece visible encima de las galerías. Las miniaturas y los detalles de la foto seleccionada aparecen lado a lado.
+
+- **Referencias OK → CAPTURAR OK**: captura las diez imágenes que forman el patrón. Cada captura ocupa una posición libre y queda seleccionada para añadir detalles.
+- **Pruebas OK → CAPTURAR OK**: captura piezas conformes independientes para validar el patrón.
+- **Fotos NG → CAPTURAR NG**: captura piezas defectuosas, separadas de las referencias.
+
+Al capturar desde estos botones no se abren preguntas de clasificación: la sección determina OK o NG. Selecciona una miniatura y edita a su lado **ID de pieza**, **tipo de defecto o característica** y **notas**. Puedes elegir un tipo sugerido o escribir uno propio. El tipo es una anotación del administrador; no se convierte automáticamente en un diagnóstico del motor visual.
+
+Las muestras reciben un identificador provisional. Usa el mismo ID si varias fotografías corresponden a la misma pieza física y pulsa **Aplicar y confirmar pieza**. Hasta confirmar la identificación, esa muestra no cuenta como una pieza distinta para habilitar la inspección.
+
+**Repetir seleccionada** reemplaza la fotografía conservando sus detalles. **Ampliar** abre la imagen grande. Las galerías permiten desplazarse y cambiar de página sin ocultar la cámara ni el panel de detalles. La importación de archivos sigue disponible como alternativa.
+
+Después pulsa **Guardar configuración** para conservar las fotografías y sus detalles en ese número de parte. Los cambios de texto se conservan en el borrador al cambiar de miniatura, pero se guardan definitivamente mediante ese botón. Exportar/importar un modelo también conserva estos detalles. Las configuraciones de versiones anteriores siguen siendo compatibles.
 
 ## Uso inicial
 
@@ -49,7 +65,7 @@ La carpeta de datos está excluida de Git. Para respaldar todo, cierra el progra
 
 ## Verificación y límites
 
-Esta versión de archivo único pasó 51 pruebas automatizadas, incluidas pruebas de interfaz con cámara simulada y del motor OpenCV sobre imágenes sintéticas. No se verificó una cámara física ni su controlador de Windows.
+Esta versión de archivo único pasó 62 pruebas automatizadas, incluidas pruebas de interfaz con cámara simulada y del motor OpenCV sobre imágenes sintéticas. No se verificó una cámara física ni su controlador de Windows.
 
 Comprueba en tu equipo enfoque, iluminación, resolución, velocidad y resultados con piezas reales. Las pruebas iniciales no garantizan una tasa de detección para todos los defectos. La presencia y el retiro se estiman visualmente; no hay un sensor físico de presencia. El motor indica diferencias por zona, sin diagnosticar automáticamente el tipo de defecto.
 

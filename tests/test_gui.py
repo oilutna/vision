@@ -157,6 +157,137 @@ class GuiTests(unittest.TestCase):
         with patch('poka_yoke_mejorado5.messagebox.askyesno',return_value=True):self.app.discard_changes()
         self.assertEqual(self.app.draft['references'][0],old)
 
+    def test_camera_remains_visible_above_all_photo_sections(self):
+        self.admin();self.model_in_editor()
+        for page in [self.app.reference_page]+[g['page'] for g in self.app.sample_galleries.values()]:
+            self.app.editor_tabs.select(page)
+            self.pump(.12)
+            self.assertTrue(self.app.admin_video.winfo_ismapped())
+            self.assertIsNotNone(self.app.admin_video.source)
+
+    def test_reference_capture_button_uses_live_camera_without_dialogs(self):
+        self.admin();m=self.model_in_editor()
+        c=copy.deepcopy(m['config']);c['references']=[None]*10;c['base_image']=None
+        self.app._load_editor(self.app.store.save(m['id'],c))
+        self.camera.frame=images()[1]
+        with patch('poka_yoke_mejorado5.simpledialog.askstring',side_effect=AssertionError('No debe abrir diálogos')):
+            self.app.capture_ok_button.invoke()
+            self.app.capture_ok_button.invoke()
+        self.assertEqual(sum(e is not None for e in self.app.draft['references']),2)
+        self.assertEqual(self.app.gallery_slot,1)
+        self.assertEqual(self.app.photo_fields['reference']['variables']['piece_id'].get(),'REF-02')
+        self.assertTrue(np.array_equal(self.app.store.image(m['id'],self.app.draft['references'][0]),images()[0]))
+
+    def test_ng_capture_thumbnail_inline_details_and_reopen(self):
+        self.admin();m=self.model_in_editor()
+        self.camera.frame=images()[2]
+        self.app.editor_tabs.select(self.app.sample_galleries['NG']['page'])
+        with patch('poka_yoke_mejorado5.simpledialog.askstring',side_effect=AssertionError('Sin preguntas emergentes')):
+            self.app.sample_galleries['NG']['capture'].invoke()
+        e=self.app.draft['samples'][0]
+        self.assertEqual(e['truth'],'NG')
+        self.assertFalse(e['identity_confirmed'])
+        self.assertEqual(len(self.app.sample_galleries['NG']['grid'].winfo_children()),1)
+        self.assertTrue(np.array_equal(self.app.store.image(m['id'],e),self.camera.frame))
+        variables=self.app.photo_fields['NG']['variables']
+        variables['piece_id'].set('ENSAMBLE-03')
+        variables['defect_type'].set('Conector faltante')
+        variables['note'].set('Falta el conector de la zona 1')
+        self.app.apply_photo_details('NG')
+        self.assertTrue(e['identity_confirmed'])
+        self.app.save_model()
+        saved=self.app.store.read(m['id'])
+        self.assertEqual(saved['config']['samples'][0]['defect_type'],'Conector faltante')
+        self.assertEqual(saved['config']['samples'][0]['note'],'Falta el conector de la zona 1')
+        self.app._load_editor(saved)
+        self.assertEqual(self.app.photo_fields['NG']['variables']['piece_id'].get(),'ENSAMBLE-03')
+
+    def test_ok_sample_button_is_independent_of_pattern_references(self):
+        self.admin();m=self.model_in_editor()
+        frame=images()[1].copy();frame[0,0]=[7,8,9]
+        self.camera.frame=frame
+        with patch('poka_yoke_mejorado5.simpledialog.askstring',side_effect=AssertionError('Sin diálogo de clase')):
+            self.app.sample_galleries['OK']['capture'].invoke()
+        self.assertEqual(len(self.app.draft['samples']),1)
+        self.assertEqual(self.app.draft['samples'][0]['truth'],'OK')
+        self.assertEqual(self.app.draft['references'],m['config']['references'])
+        self.assertEqual(len(self.app.sample_galleries['NG']['grid'].winfo_children()),0)
+
+    def test_photo_changes_are_kept_when_capturing_or_switching_thumbnails(self):
+        self.admin();self.model_in_editor()
+        self.camera.frame=images()[2].copy()
+        first=self.app.capture_sample('NG')
+        self.app.photo_fields['NG']['variables']['defect_type'].set('Faltante')
+        self.app.photo_fields['NG']['variables']['note'].set('Detalle de la primera foto')
+        self.camera.frame[0,0]=[12,13,14]
+        second=self.app.capture_sample('NG')
+        self.assertEqual(self.app.draft['samples'][0]['note'],'Detalle de la primera foto')
+        self.assertFalse(self.app.draft['samples'][0]['identity_confirmed'])
+        self.app._select_sample(first['id'])
+        self.assertEqual(self.app.photo_fields['NG']['variables']['defect_type'].get(),'Faltante')
+        self.app._select_sample(second['id'])
+        self.assertEqual(self.app.photo_fields['NG']['variables']['note'].get(),'')
+
+    def test_applying_reference_details_does_not_discard_ng_edits(self):
+        self.admin();self.model_in_editor()
+        self.camera.frame=images()[2]
+        self.app.capture_sample('NG')
+        self.app.photo_fields['NG']['variables']['note'].set('Nota NG pendiente')
+        self.app.photo_fields['reference']['variables']['note'].set('Referencia nominal')
+        self.app.apply_photo_details('reference')
+        self.assertEqual(self.app.draft['samples'][0]['note'],'Nota NG pendiente')
+        self.assertEqual(self.app.draft['references'][0]['note'],'Referencia nominal')
+        self.assertEqual(self.app.photo_fields['NG']['variables']['note'].get(),'Nota NG pendiente')
+
+    def test_retake_ng_preserves_identity_and_defect_details(self):
+        self.admin();self.model_in_editor()
+        self.camera.frame=images()[2].copy()
+        self.app.capture_sample('NG')
+        self.app.photo_fields['NG']['variables']['defect_type'].set('Mal colocado')
+        self.app.apply_photo_details('NG')
+        original=copy.deepcopy(self.app.draft['samples'][0])
+        self.camera.frame[0,0]=[91,92,93]
+        with patch('poka_yoke_mejorado5.messagebox.askyesno',return_value=True):self.app.retake_sample('NG')
+        entry=self.app.draft['samples'][0]
+        self.assertEqual(entry['id'],original['id'])
+        self.assertEqual(entry['piece_id'],original['piece_id'])
+        self.assertEqual(entry['defect_type'],'Mal colocado')
+        self.assertNotEqual(entry['path'],original['path'])
+        self.assertEqual(len(self.app.draft['samples']),1)
+
+    def test_capture_does_not_reuse_stale_frame_after_camera_disconnect(self):
+        self.admin();self.model_in_editor()
+        self.camera.ready=False
+        with self.assertRaisesRegex(ValueError,'imagen reciente'):
+            self.app.capture_sample('NG')
+        self.assertEqual(self.app.draft['samples'],[])
+
+    def test_sample_gallery_paginates_and_selects_each_photo(self):
+        self.admin();m=self.model_in_editor()
+        m=add_samples(self.app.store,m)
+        self.app._load_editor(m)
+        self.assertEqual(len(self.app.sample_galleries['NG']['grid'].winfo_children()),8)
+        self.app.sample_page('NG',1)
+        self.assertEqual(len(self.app.sample_galleries['NG']['grid'].winfo_children()),2)
+        last=[s for s in m['config']['samples'] if s['truth']=='NG'][-1]
+        self.app.sample_page('NG',-1)
+        self.app._select_sample(last['id'])
+        self.assertEqual(self.app.sample_galleries['NG']['offset'],8)
+        self.assertEqual(self.app.photo_fields['NG']['variables']['piece_id'].get(),last['piece_id'])
+
+    def test_live_capture_layout_keeps_camera_thumbnails_and_notes_visible(self):
+        self.admin();self.model_in_editor()
+        self.camera.frame=images()[2]
+        self.app.capture_sample('NG')
+        self.pump(.2)
+        thumbnail=self.app.sample_galleries['NG']['grid'].winfo_children()[0]
+        note=self.app.photo_fields['NG']['widgets'][2]
+        for widget in (self.app.admin_video,thumbnail,note):
+            self.assertTrue(widget.winfo_ismapped())
+            x=widget.winfo_rootx()+widget.winfo_width()//2
+            y=widget.winfo_rooty()+widget.winfo_height()//2
+            self.assertEqual(self.root.winfo_containing(x,y),widget)
+
     def test_validation_and_enable_from_gui_with_actual_engine(self):
         self.admin();m=self.model_in_editor()
         m=add_samples(self.app.store,m)
