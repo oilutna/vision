@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 from poka_yoke_mejorado5 import Store, canonical
-from poka_yoke_mejorado5 import VisionEngine,InspectionCycle,FRAMES_ESTABLES,FRAMES_PROMEDIO
+from poka_yoke_mejorado5 import VisionEngine,InspectionCycle,FRAMES_ESTABLES,FRAMES_PROMEDIO,reference_samples,ng_samples
 from tests.helpers import make_model,add_samples,images,dummy_result
 
 
@@ -50,19 +50,23 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(np.array_equal(output[...,1:],lab[...,1:]))
 
     def test_full_validation_batch_with_actual_images(self):
-        m=add_samples(self.store,self.model)
+        m=add_samples(self.store,self.model,truths=('NG',))
         e=VisionEngine(self.store,m)
-        for sample in m['config']['samples']:
+        self.assertEqual(len(m['config']['samples']),10)
+        for sample in reference_samples(m['config'])+ng_samples(m['config']):
             image=self.store.image(m['id'],sample)
             result,annotated,note=e.evaluate_sample(image,sample)
             self.assertIsNotNone(result,note)
             self.assertEqual('OK' if result['ok'] else 'NG',sample['truth'])
-            self.store.record(m,result,kind='validation',truth=sample['truth'],piece_id=sample['piece_id'],
+            kind='reference_check' if sample['truth']=='OK' else 'validation'
+            self.store.record(m,result,kind=kind,truth=sample['truth'],piece_id=sample['piece_id'],
                               sample_id=sample['id'],image=image,annotated=annotated)
         summary=self.store.validation_summary(m)
-        self.assertEqual(summary['ok_accepted'],10)
-        self.assertEqual(summary['ng_rejected'],10)
-        self.assertEqual(summary['unevaluated'],0)
+        self.assertEqual(summary['reference_ok'],10)
+        self.assertEqual(summary['ng_photo_rejected'],10)
+        self.assertEqual(summary['reference_unevaluated']+summary['ng_photo_unevaluated'],0)
+        self.assertEqual(summary['ok_pieces'],0)
+        self.assertEqual(summary['ok_accepted'],0)
         approved=self.store.approve(m['id'],'Prueba software',aligned_references=e.aligned_references)
         self.assertEqual(approved['validation']['version'],m['version'])
 

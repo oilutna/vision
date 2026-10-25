@@ -1,59 +1,63 @@
 # Poka-Yoke 5
 
-Versión **5.1.0**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. El programa completo está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.2.0**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
 
 ## Ejecutar
 
-Recomendado: Python 3.12 de 64 bits, con Tkinter. Instala las dependencias desde esta carpeta:
+Recomendado: Python 3.12 de 64 bits, con Tkinter. Desde esta carpeta:
 
 ```sh
 python -m pip install -r requirements.txt
 python poka_yoke_mejorado5.py
 ```
 
-En Windows puedes usar `py -3` en lugar de `python`.
+En Windows puedes usar `py -3` en lugar de `python`. Para actualizar, cierra el programa y reemplaza únicamente el archivo `.py`, conservando tu carpeta `datos`.
 
-## Vista previa de cámara
+## Cámara
 
-La cámara se abre automáticamente al iniciar, aunque no haya un modelo registrado. La vista previa no inicia la inspección ni incrementa contadores.
+La cámara se abre automáticamente al iniciar, aunque no haya un modelo registrado. El botón **Abrir / reconectar cámara** está visible en la parte superior. La vista previa no inicia la inspección ni incrementa contadores.
 
-El botón **Abrir / reconectar cámara** está visible en la parte superior. Si necesitas otro dispositivo, abre un modelo en Administración, selecciona su número de cámara y pulsa **Abrir cámara**. Al cargar un modelo también se abre su cámara automáticamente.
+En Administración puedes seleccionar otro número de cámara y su resolución. Al cargar un modelo se abre su cámara automáticamente. El estado inferior informa la resolución real y los errores; en Windows se intentan otros controladores si el primero abre el dispositivo pero no entrega imágenes.
 
-En Windows, si un controlador abre el dispositivo pero no entrega imágenes, se intentan otras opciones de captura. Se espera el primer cuadro válido antes de mostrar la cámara como lista. El estado inferior informa el resultado; un fallo de lectura permite reconectar sin cerrar el programa.
+## Preparar un número de parte con sólo 10 OK y 10 NG
 
-Para actualizar desde 5.0, cierra la aplicación y reemplaza únicamente `poka_yoke_mejorado5.py`, conservando tu carpeta `datos`.
+1. Entra a Administración y establece tu contraseña local en el primer uso.
+2. Crea un número de parte, o copia tus modelos anteriores con **Importar modelos v3/v4** sin modificar los originales.
+3. Configura la cámara y dibuja la región general de la pieza.
+4. En **Fotos OK · referencia**, pulsa **CAPTURAR OK** hasta completar diez fotos conformes. **Estas mismas diez fotos son la referencia del modelo. No se solicita un segundo grupo de OK.**
+5. Dibuja tres o cinco zonas y asigna sus nombres.
+6. En **Fotos NG**, pulsa **CAPTURAR NG** hasta completar diez fotos defectuosas. Las NG nunca se incorporan al patrón OK.
+7. Ajusta los deslizadores de umbral por zona y guarda la configuración.
+8. En **Comprobación**, pulsa **Comprobar 10 OK + 10 NG**. Se utilizan las diez OK ya guardadas y las diez NG: no necesitas más capturas.
+9. Revisa el resultado y habilita esa versión si las veinte fotos se evaluaron correctamente. Después sal de Administración, selecciona el número de parte e introduce operador y lote para inspeccionar.
 
-## Capturar OK y NG con la cámara visible
+Una vez completas las diez fotos de cada clase, utiliza **Repetir seleccionada** para sustituir una. No se agregan fotos adicionales desde los botones de captura. Si un modelo anterior tiene muestras adicionales, se conservan; la comprobación utiliza las diez posiciones OK de referencia y las primeras diez NG. Las muestras OK adicionales de versiones anteriores ya no se piden ni se usan para este requisito.
 
-En **Administración → Configuración del modelo**, la cámara permanece visible encima de las galerías. Las miniaturas y los detalles de la foto seleccionada aparecen lado a lado.
+## Umbral por zona con deslizadores
 
-- **Referencias OK → CAPTURAR OK**: captura las diez imágenes que forman el patrón. Cada captura ocupa una posición libre y queda seleccionada para añadir detalles.
-- **Pruebas OK → CAPTURAR OK**: captura piezas conformes independientes para validar el patrón.
-- **Fotos NG → CAPTURAR NG**: captura piezas defectuosas, separadas de las referencias.
+Cada zona tiene un deslizador y su valor visible. El rango es de **50 % a 300 % de la calibración automática**; conserva el significado de los límites de versiones anteriores. Un porcentaje mayor permite diferencias mayores. Las zonas 4 y 5 quedan desactivadas cuando seleccionas el modo de tres zonas.
 
-Al capturar desde estos botones no se abren preguntas de clasificación: la sección determina OK o NG. Selecciona una miniatura y edita a su lado **ID de pieza**, **tipo de defecto o característica** y **notas**. Puedes elegir un tipo sugerido o escribir uno propio. El tipo es una anotación del administrador; no se convierte automáticamente en un diagnóstico del motor visual.
+Los ajustes son temporales hasta pulsar **Guardar configuración**. Al volver a seleccionar ese número de parte se recuperan sus valores, sin mezclarlos con los de otro modelo. **Restaurar guardada** descarta el borrador; **Recuperar versión anterior** recupera ajustes e imágenes anteriores como otra versión pendiente de comprobar.
 
-Las muestras reciben un identificador provisional. Usa el mismo ID si varias fotografías corresponden a la misma pieza física y pulsa **Aplicar y confirmar pieza**. Hasta confirmar la identificación, esa muestra no cuenta como una pieza distinta para habilitar la inspección.
+## Miniaturas y detalles de cada foto
 
-**Repetir seleccionada** reemplaza la fotografía conservando sus detalles. **Ampliar** abre la imagen grande. Las galerías permiten desplazarse y cambiar de página sin ocultar la cámara ni el panel de detalles. La importación de archivos sigue disponible como alternativa.
+La cámara permanece visible encima de las galerías. Las miniaturas aparecen a la izquierda y los detalles de la foto seleccionada a la derecha.
 
-Después pulsa **Guardar configuración** para conservar las fotografías y sus detalles en ese número de parte. Los cambios de texto se conservan en el borrador al cambiar de miniatura, pero se guardan definitivamente mediante ese botón. Exportar/importar un modelo también conserva estos detalles. Las configuraciones de versiones anteriores siguen siendo compatibles.
+Al capturar, la foto queda seleccionada y puedes editar **ID de pieza**, **tipo de defecto o característica** y **notas**, sin preguntas emergentes para clasificarla. La sección determina OK o NG. Puedes elegir un tipo sugerido o escribir uno propio; esa etiqueta es una anotación del administrador, no un diagnóstico automático del motor.
 
-## Uso inicial
+Usa el mismo ID si varias fotos corresponden a la misma pieza física. **Aplicar detalles** prepara los cambios en el borrador; **Guardar configuración** los conserva en ese número de parte. La comprobación cuenta fotografías: diez vistas de una misma pieza no demuestran el comportamiento con diez piezas diferentes.
 
-1. Abre Administración y establece tu contraseña local (mínimo ocho caracteres).
-2. Crea un número de parte o usa **Importar modelos v3/v4** para copiar tus modelos anteriores sin modificar los originales.
-3. Configura la cámara y su resolución real, región general, diez referencias OK y tres o cinco zonas con sus nombres y límites.
-4. Prueba los ajustes y guarda la configuración. Puedes descartar el borrador o recuperar una versión anterior.
-5. Agrega muestras independientes de al menos diez piezas OK y diez NG. Identifica cada pieza física; repetir fotos de la misma pieza no cuenta como piezas distintas.
-6. Guarda, ejecuta las pruebas y revisa los resultados antes de habilitar la versión para inspección.
-7. Sal de Administración, selecciona el número de parte e introduce operador y lote para iniciar.
+**Repetir seleccionada** conserva los detalles al cambiar su imagen. **Ampliar** abre la fotografía grande. También puedes importar imágenes compatibles, eliminar capturas y exportar/importar modelos completos con sus detalles.
 
-Las muestras NG se guardan separadas de las referencias OK. Los cambios de configuración requieren nueva validación. Una muestra sin evaluación se distingue de una aceptación o rechazo.
+## Cómo interpretar la comprobación
 
-La interfaz permite buscar números de parte, gestionar referencias, guardar y recuperar ajustes, importar/exportar modelos y consultar el historial con fotografías y reportes CSV.
+Las diez OK se utilizan para construir el patrón y después se comprueban contra ese mismo patrón. Su resultado se muestra como **comprobación de referencia OK**, separado del resultado de las NG. **No es una validación independiente ni mide el desempeño con piezas nuevas.**
 
-## Datos
+Para habilitar una versión se requieren diez OK comprobadas y diez NG comprobadas, sin rechazos de las OK, aceptaciones de las NG ni fotografías sin evaluación. Una NG que no se puede localizar queda sin evaluación; no cuenta como defecto detectado. La aprobación y los resultados pertenecen a la versión exacta guardada.
+
+En el historial se distinguen las comprobaciones de referencia, las pruebas NG y la producción. Los contadores de operación incluyen únicamente inspecciones de producción del número de parte y lote activos.
+
+## Datos y respaldos
 
 Por defecto se guardan modelos, versiones, contraseña y registros en `datos`, junto al archivo Python. La ubicación no depende de la carpeta desde la que se ejecuta. Puedes cambiarla:
 
@@ -61,15 +65,15 @@ Por defecto se guardan modelos, versiones, contraseña y registros en `datos`, j
 python poka_yoke_mejorado5.py --data-dir "D:/PokaYokeDatos"
 ```
 
-La carpeta de datos está excluida de Git. Para respaldar todo, cierra el programa y copia esa carpeta. Exportar un modelo conserva su receta actual e imágenes, pero no incluye la contraseña ni el historial completo.
+La carpeta de datos está excluida de Git. Para respaldar todo, cierra el programa y copia esa carpeta. Exportar un modelo conserva su receta actual e imágenes, pero no incluye la contraseña ni el historial completo. Las configuraciones anteriores siguen siendo compatibles.
 
 ## Verificación y límites
 
-Esta versión de archivo único pasó 62 pruebas automatizadas, incluidas pruebas de interfaz con cámara simulada y del motor OpenCV sobre imágenes sintéticas. No se verificó una cámara física ni su controlador de Windows.
+Esta versión pasó **66 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. No se verificó una cámara física ni su controlador de Windows.
 
-Comprueba en tu equipo enfoque, iluminación, resolución, velocidad y resultados con piezas reales. Las pruebas iniciales no garantizan una tasa de detección para todos los defectos. La presencia y el retiro se estiman visualmente; no hay un sensor físico de presencia. El motor indica diferencias por zona, sin diagnosticar automáticamente el tipo de defecto.
+Comprueba en tu equipo enfoque, iluminación, resolución, velocidad y resultados con piezas reales. La presencia y el retiro se estiman visualmente; no hay un sensor físico de presencia. El motor indica diferencias por zona, sin diagnosticar automáticamente el tipo de defecto.
 
-## Ejecutar las pruebas
+Para ejecutar las pruebas:
 
 ```sh
 python -m unittest discover -v

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Poka-Yoke 5.1.0 — archivo único: Administración e Inspección.
+"""Poka-Yoke 5.2.0 — archivo único: Administración e Inspección.
 
 Ejecutar: python poka_yoke_mejorado5.py
 Dependencias: python -m pip install numpy opencv-python Pillow
@@ -97,6 +97,18 @@ def canonical(config):
     # No references to mutable image filenames: image assets are addressed by SHA256.
     return hashlib.sha256(json.dumps(config, sort_keys=True, allow_nan=False,
                                     separators=(',', ':')).encode()).hexdigest()
+
+
+def reference_samples(config):
+    """Las diez fotos OK, sin copias ni incorporación a las muestras NG."""
+    return [dict(entry,id=f'reference:{i}',truth='OK',kind='crop',
+                 piece_id=entry.get('piece_id') or f'REF-{i+1:02d}',note=entry.get('note',''))
+            for i,entry in enumerate(config['references']) if entry]
+
+
+def ng_samples(config):
+    # Se conservan muestras antiguas adicionales, pero el flujo usa sólo diez NG.
+    return [entry for entry in config['samples'] if entry['truth'] == 'NG'][:10]
 
 
 def number(value, low, high, name, integer=False):
@@ -520,7 +532,7 @@ class Store:
 
     def record(self, m, result, *, kind='production', operator='', lot='', work_order='',
                truth=None, piece_id='', sample_id='', image=None, annotated=None, note=''):
-        if kind not in ('production', 'validation', 'test', 'manual'):
+        if kind not in ('production', 'validation', 'test', 'manual', 'reference_check'):
             raise ValueError('Tipo de evaluación inválido.')
         if truth not in (None, 'OK', 'NG'):
             raise ValueError('Etiqueta real inválida.')
@@ -606,6 +618,35 @@ class Store:
                 key = ('ok_accepted' if r['outcome'] == 'OK' else 'ok_rejected') if truth == 'OK' else (
                     'ng_rejected' if r['outcome'] == 'NG' else 'ng_accepted')
                 summary[key] += 1
+        # Informar la comprobación de las referencias aparte de la validación independiente.
+        checks = self.events(model_id=m['id'],kind='reference_check',limit=100000)
+        current_refs = {entry['id']:entry for entry in reference_samples(m['config'])}
+        seen = set()
+        summary.update(reference_total=0,reference_ok=0,reference_ng=0,reference_unevaluated=0,
+                       ng_photos=0,ng_photo_rejected=0,ng_photo_accepted=0,ng_photo_unevaluated=0)
+        for row in checks:
+            sid = row['sample_id']
+            if (sid in seen or sid not in current_refs or row['truth'] != 'OK'
+                    or row['version'] != m['version'] or row['fingerprint'] != canonical(m['config'])):
+                continue
+            seen.add(sid)
+            summary['reference_total'] += 1
+            key = {'OK':'reference_ok','NG':'reference_ng','SIN_EVALUACION':'reference_unevaluated'}[row['outcome']]
+            summary[key] += 1
+        current_ng = {entry['id']:entry for entry in ng_samples(m['config'])}
+        seen,images = set(),set()
+        for row in rows:
+            sid = row['sample_id']
+            entry = current_ng.get(sid)
+            if (not entry or sid in seen or entry['path'] in refs or entry['path'] in images
+                    or row['truth'] != 'NG' or row['version'] != m['version']
+                    or row['fingerprint'] != canonical(m['config']) or row['piece_id'] != entry['piece_id']):
+                continue
+            seen.add(sid)
+            images.add(entry['path'])
+            summary['ng_photos'] += 1
+            key = {'NG':'ng_photo_rejected','OK':'ng_photo_accepted','SIN_EVALUACION':'ng_photo_unevaluated'}[row['outcome']]
+            summary[key] += 1
         return summary
 
     def approve(self, mid, operator, *, aligned_references):
@@ -614,12 +655,14 @@ class Store:
         if aligned_references != 10:
             raise ValueError('Faltan 10 referencias OK alineables.')
         s = self.validation_summary(m)
-        if s['ok_pieces'] < 10 or s['ng_pieces'] < 10:
-            raise ValueError('Se requieren pruebas de al menos 10 piezas OK y 10 NG distintas, fuera de las referencias.')
-        if s['unevaluated'] or s['ok_rejected'] or s['ng_accepted']:
+        if s['reference_total'] != 10 or s['ng_photos'] != 10:
+            raise ValueError('Comprueba las mismas 10 fotos OK de referencia y las 10 fotos NG. No se requieren más fotos OK.')
+        if (s['reference_unevaluated'] or s['reference_ng']
+                or s['ng_photo_unevaluated'] or s['ng_photo_accepted']):
             raise ValueError('Hay pruebas incorrectas o sin evaluación; corrige y vuelve a probar esta versión.')
         m['validation'] = dict(version=m['version'], fingerprint=canonical(m['config']),
-                               at=now(), administrator=operator, summary=s)
+                               at=now(), administrator=operator, summary=s,
+                               mode='reference_and_ng_check',independent_ok_validation=False)
         atomic_json(self.model_dir(mid) / 'modelo.json', m)
         return m
 
@@ -1441,7 +1484,8 @@ from PIL import Image, ImageTk
 
 
 EVENT_TYPES = {'production':'Producción', 'validation':'Validación',
-               'test':'Prueba', 'manual':'Reevaluación manual'}
+               'test':'Prueba', 'manual':'Reevaluación manual',
+               'reference_check':'Comprobación de referencia OK'}
 
 
 def admin_action(fn):
@@ -1693,6 +1737,9 @@ class Application:
         ttk.Label(controls,text='Puede ocultar cambios de color. Desactívalo si el color es un criterio y valida nuevamente.',
                   wraplength=320,style='Muted.TLabel').pack(fill='x',padx=8)
         self.zone_fields = {}
+        self.zone_scales = {}
+        self.zone_values = {}
+        self._updating_zone_scale = False
         for i in range(1,6):
             box = ttk.LabelFrame(controls,text=f'Zona {i}',padding=6)
             box.pack(fill='x',padx=8,pady=5)
@@ -1701,14 +1748,21 @@ class Application:
             ttk.Entry(box,textvariable=name).pack(fill='x')
             row = ttk.Frame(box)
             row.pack(fill='x',pady=4)
-            ttk.Label(row,text='Límite (% de calibración):').pack(side='left')
-            ttk.Spinbox(row,from_=50,to=300,textvariable=factor,width=6).pack(side='right')
+            ttk.Label(row,text='Umbral de zona:').pack(side='left')
+            value = tk.StringVar(value='100 %')
+            ttk.Label(row,textvariable=value,style='Accent.TLabel').pack(side='right')
+            scale = ttk.Scale(box,from_=50,to=300,orient='horizontal',
+                              command=lambda v,key=str(i):self._zone_scale_moved(key,v))
+            scale.pack(fill='x',pady=(0,4))
             button(box,'Dibujar / editar zona',lambda idx=i:self.edit_zone(idx))
             state = ttk.Label(box,text='Sin dibujar',style='Muted.TLabel')
             state.pack(anchor='w')
             name.trace_add('write',self._mark_dirty)
-            factor.trace_add('write',self._mark_dirty)
             self.zone_fields[str(i)] = (name,factor,state)
+            self.zone_scales[str(i)] = scale
+            self.zone_values[str(i)] = value
+            factor.trace_add('write',lambda *args,key=str(i):self._zone_factor_changed(key))
+            scale.set(100)
         right = ttk.Panedwindow(body,orient='vertical')
         body.add(right,weight=3)
         preview = ttk.Frame(right)
@@ -1733,7 +1787,7 @@ class Application:
         self.selected_sample_ids = {'OK':None,'NG':None}
         gallery = ttk.Frame(self.editor_tabs)
         self.reference_page = gallery
-        self.editor_tabs.add(gallery,text='Referencias OK')
+        self.editor_tabs.add(gallery,text='Fotos OK · referencia')
         self.gallery_info = ttk.Label(gallery,text='0 / 10 referencias OK',style='Accent.TLabel')
         self.gallery_info.pack(anchor='w',pady=4)
         row = ttk.Frame(gallery)
@@ -1759,11 +1813,10 @@ class Application:
         for i in range(2):
             grid.columnconfigure(i,weight=1)
         self._build_photo_details(details,'reference')
-        for truth,title in [('OK','Pruebas OK'),('NG','Fotos NG')]:
+        for truth,title in [('NG','Fotos NG')]:
             page = ttk.Frame(self.editor_tabs)
             self.editor_tabs.add(page,text=title)
-            ttk.Label(page,text=('Piezas OK independientes de las referencias del patrón.' if truth == 'OK'
-                                else 'Captura NG y selecciona su miniatura para describir el defecto.'),
+            ttk.Label(page,text='Captura 10 fotos NG y selecciona cada miniatura para describir el defecto.',
                       wraplength=750).pack(fill='x',pady=2)
             row = ttk.Frame(page)
             row.pack(fill='x')
@@ -1791,8 +1844,8 @@ class Application:
             self._build_photo_details(details,truth)
         validation_scroll = ScrollFrame(self.editor_tabs)
         validation = validation_scroll.inner
-        self.editor_tabs.add(validation_scroll,text='Validación')
-        ttk.Label(validation,text='Identifica cada pieza física. Varias fotografías de la misma pieza cuentan como una sola.',
+        self.editor_tabs.add(validation_scroll,text='Comprobación')
+        ttk.Label(validation,text='Se comprueban las mismas 10 OK de referencia y 10 NG. No necesitas capturar más fotos OK.',
                   wraplength=650).pack(fill='x',pady=4)
         self.samples_table = table(validation,[('piece','Pieza',120),('truth','Real',55),
                                   ('defect','Tipo de defecto',140),('note','Notas',180)],height=5)
@@ -1803,12 +1856,13 @@ class Application:
         button(row,'Editar detalles',self.edit_sample)
         row = ttk.Frame(validation)
         row.pack(fill='x')
-        button(row,'Ejecutar pruebas guardadas',self.run_validation)
+        button(row,'Comprobar 10 OK + 10 NG',self.run_validation)
         button(row,'Habilitar versión para inspección',self.approve_model)
         self.validation_info = ttk.Label(validation,text='Sin pruebas de esta versión.',wraplength=650,justify='left',padding=8)
         self.validation_info.pack(fill='x')
-        ttk.Label(validation,text='La habilitación requiere 10 OK y 10 NG distintas, sin errores ni muestras sin evaluación. '
-                  'Estas pruebas iniciales no garantizan precisión futura.',wraplength=650,style='Muted.TLabel').pack(fill='x',pady=8)
+        ttk.Label(validation,text='Las OK se reutilizan para formar y comprobar la referencia. '
+                  'Es una comprobación de ajuste; no mide el desempeño con piezas nuevas.',
+                  wraplength=650,style='Muted.TLabel').pack(fill='x',pady=8)
 
     def _build_photo_details(self,parent,key):
         box = ttk.LabelFrame(parent,text='Detalles de la fotografía seleccionada',padding=6)
@@ -1828,7 +1882,7 @@ class Application:
         note.grid(row=3,column=1,sticky='ew',padx=4,pady=3)
         row = ttk.Frame(box)
         row.grid(row=4,column=0,columnspan=2,sticky='ew')
-        button(row,'Aplicar detalles' if key == 'reference' else 'Aplicar y confirmar pieza',
+        button(row,'Aplicar detalles',
                lambda value=key:self.apply_photo_details(value))
         button(row,'Ampliar',lambda value=key:self.view_photo(value))
         ttk.Label(box,text='Misma pieza física = mismo ID.',style='Muted.TLabel').grid(row=5,column=0,columnspan=2,sticky='w')
@@ -1869,8 +1923,6 @@ class Application:
                 w.state(['!disabled'] if entry else ['disabled'])
             caption = ('Referencia OK '+str(int(target)+1)) if key == 'reference' and entry else (
                       f"Foto {key} · {entry['piece_id']}" if entry else 'Selecciona una miniatura o captura una fotografía.')
-            if entry and key != 'reference' and not entry.get('identity_confirmed',True):
-                caption += ' · confirmar ID'
             panel['title'].configure(text=caption)
         finally:
             self._photo_loading = False
@@ -1969,13 +2021,48 @@ class Application:
         for i in range(2):
             gallery['grid'].columnconfigure(i,weight=1)
         pages = max(1,(count+7)//8)
-        gallery['info'].configure(text=f'{count} fotos {truth} · página {offset//8+1} de {pages}')
+        gallery['info'].configure(text=f'{count}/10 fotos {truth} · {offset//8+1}/{pages}')
         gallery['previous'].state(['!disabled'] if offset else ['disabled'])
         gallery['next'].state(['!disabled'] if offset+8 < count else ['disabled'])
 
     def _callback_error(self, exc, value, tb):
         traceback.print_exception(exc,value,tb)
         messagebox.showerror('No se completó la operación',str(value),parent=self.root)
+
+    def _zone_scale_moved(self,key,value):
+        if self._updating_zone_scale:
+            return
+        factor = max(50,min(300,int(round(float(value)))))
+        self._updating_zone_scale = True
+        try:
+            self.zone_fields[key][1].set(str(factor))
+            self.zone_values[key].set(f'{factor} %')
+        finally:
+            self._updating_zone_scale = False
+        self._mark_dirty()
+
+    def _zone_factor_changed(self,key):
+        if self._updating_zone_scale:
+            return
+        try:
+            factor = int(self.zone_fields[key][1].get())
+        except ValueError:
+            return
+        self._updating_zone_scale = True
+        try:
+            self.zone_scales[key].set(factor)
+            self.zone_values[key].set(f'{factor} %')
+        finally:
+            self._updating_zone_scale = False
+        self._mark_dirty()
+
+    def _update_zone_activity(self):
+        try:
+            total = int(self.fields['zone_count'].get())
+        except ValueError:
+            return
+        for key,scale in self.zone_scales.items():
+            scale.state(['!disabled'] if int(key) <= total else ['disabled'])
 
     def _submit(self, work, done, text):
         if self.task is not None:
@@ -1987,11 +2074,12 @@ class Application:
     def _set_admin_editable(self, enabled):
         def walk(parent):
             for w in parent.winfo_children():
-                if isinstance(w, (ttk.Button, ttk.Entry, ttk.Combobox, ttk.Spinbox, ttk.Checkbutton)):
+                if isinstance(w, (ttk.Button, ttk.Entry, ttk.Combobox, ttk.Spinbox, ttk.Checkbutton,ttk.Scale)):
                     w.state(['!disabled'] if enabled else ['disabled'])
                 walk(w)
         walk(self.admin)
         if enabled:
+            self._update_zone_activity()
             for key,panel in self.photo_fields.items():
                 if self.photo_targets.get(key) is None:
                     for w in panel['widgets']:
@@ -2006,6 +2094,8 @@ class Application:
             return
         self.dirty = True
         self.dirty_label.configure(text='Cambios sin guardar')
+        if hasattr(self,'zone_scales'):
+            self._update_zone_activity()
 
     def _sync(self):
         self._need_model()
@@ -2076,6 +2166,7 @@ class Application:
             self._refresh_gallery()
             self._refresh_samples()
             self._refresh_validation()
+            self._update_zone_activity()
         finally:
             self.loading = False
         self._configure_preview(c['camera'])
@@ -2547,20 +2638,24 @@ class Application:
         selected = self.gallery_slot
         self._refresh_gallery()
         self.message.set(f'Referencia OK {selected+1} preparada. Guarda cuando termines los cambios.')
+        return entry
 
-    @admin_action
-    def capture_reference(self):
+    def _capture_ok_image(self,image):
         c = self._sync()
         if c['roi'] is None:
             raise ValueError('Dibuja primero la región general de la pieza.')
         empty = next((i for i,e in enumerate(c['references']) if not e),None)
         if empty is None:
             raise ValueError('Las 10 referencias OK están completas. Usa Repetir seleccionada para reemplazar una.')
-        image = self._fresh_frame(c)
         self.preview_hold_until = 0
         if c['references'][self.gallery_slot]:
             self.gallery_slot = empty
-        self._replace_reference(image)
+        return self._replace_reference(image)
+
+    @admin_action
+    def capture_reference(self):
+        c = self._sync()
+        return self._capture_ok_image(self._fresh_frame(c))
 
     @admin_action
     def retake_reference(self):
@@ -2574,7 +2669,7 @@ class Application:
         self._need_model()
         path = filedialog.askopenfilename(parent=self.root,title='Importar referencia OK',filetypes=[('Imágenes','*.png *.jpg *.jpeg *.bmp *.tif *.tiff')])
         if path:
-            self._replace_reference(load_image(path))
+            return self._capture_ok_image(load_image(path))
 
     @admin_action
     def remove_reference(self):
@@ -2586,20 +2681,6 @@ class Application:
             self._mark_dirty()
             self._refresh_gallery()
 
-    def _sample_labels(self,initial=None):
-        initial = initial or {}
-        truth = simpledialog.askstring('Condición real','Escribe OK o NG según la condición REAL de la pieza:',initialvalue=initial.get('truth',''),parent=self.root)
-        if truth is None:
-            return None
-        truth = truth.strip().upper()
-        if truth not in ('OK','NG'):
-            raise ValueError('La condición debe ser OK o NG.')
-        piece = simpledialog.askstring('Identificar pieza','Identificador de la pieza física (repite el mismo si es la misma pieza):',initialvalue=initial.get('piece_id',''),parent=self.root)
-        if not piece:
-            return None
-        note = simpledialog.askstring('Defecto o nota','Defecto esperado o nota (opcional):',initialvalue=initial.get('note',''),parent=self.root)
-        return truth,piece.strip(),note or ''
-
     def _next_piece_id(self,truth):
         existing = {s['piece_id'].casefold() for s in self.draft['samples']}
         index = 1
@@ -2609,15 +2690,14 @@ class Application:
 
     def _add_sample(self,image,truth=None):
         c = self._sync()
-        if truth is None:
-            labels = self._sample_labels()
-            if labels is None:
-                return
-            truth,piece,note = labels
-        else:
-            if truth not in ('OK','NG'):
-                raise ValueError('La sección de captura debe indicar OK o NG.')
-            piece,note = self._next_piece_id(truth),''
+        truth = truth or 'NG'
+        if truth == 'OK':
+            return self._capture_ok_image(image)
+        if truth != 'NG':
+            raise ValueError('La sección de captura debe indicar OK o NG.')
+        if sum(s['truth'] == 'NG' for s in c['samples']) >= 10:
+            raise ValueError('Las 10 fotos NG están completas. Usa Repetir seleccionada para reemplazar una.')
+        piece,note = self._next_piece_id(truth),''
         cam = c['camera']
         if image.shape[:2] == (cam['height'],cam['width']):
             kind = 'full'
@@ -2629,7 +2709,7 @@ class Application:
         if any(s['path'] == e['path'] for s in c['samples']):
             raise ValueError('Esta imagen ya está entre las muestras. No cuenta como otra pieza.')
         if any(r and r['path'] == e['path'] for r in c['references']) or (c['base_image'] and c['base_image']['path'] == e['path']):
-            raise ValueError('Usa muestras independientes de las imágenes de referencia.')
+            raise ValueError('Esta imagen ya está guardada como OK. Captura una foto NG.')
         e.update(id=uuid.uuid4().hex,piece_id=piece,truth=truth,kind=kind,note=note,
                  defect_type='Conforme' if truth == 'OK' else '',captured_at=now(),identity_confirmed=False)
         c['samples'].append(e)
@@ -2641,19 +2721,21 @@ class Application:
         self._mark_dirty()
         self._refresh_samples()
         self.editor_tabs.select(self.sample_galleries[truth]['page'])
-        self.message.set(f'Foto {truth} capturada. Edita sus detalles y confirma el ID de pieza. Reutiliza el ID si es la misma pieza.')
+        self.message.set('Foto NG capturada. Puedes editar el tipo de defecto y las notas junto a su miniatura.')
         return e
 
     @admin_action
     def capture_sample(self,truth=None):
+        if truth == 'OK':
+            return self.capture_reference()
         c = self._sync()
         self.preview_hold_until = 0
-        if truth is None:
-            truth = 'NG' if self.editor_tabs.select() == str(self.sample_galleries['NG']['page']) else 'OK'
-        return self._add_sample(self._fresh_frame(c),truth)
+        return self._add_sample(self._fresh_frame(c),truth or 'NG')
 
     @admin_action
     def import_sample(self,truth=None):
+        if truth == 'OK':
+            return self.import_reference()
         self._need_model()
         path = filedialog.askopenfilename(parent=self.root,title=f'Importar muestra {truth or "OK o NG"}',
                     filetypes=[('Imágenes','*.png *.jpg *.jpeg *.bmp *.tif *.tiff')])
@@ -2662,6 +2744,8 @@ class Application:
 
     @admin_action
     def retake_sample(self,truth):
+        if truth == 'OK':
+            return self.retake_reference()
         c = self._sync()
         entry = self._selected_sample(truth)
         image = self._fresh_frame(c)
@@ -2669,7 +2753,7 @@ class Application:
         if any(s['id'] != entry['id'] and s['path'] == asset['path'] for s in c['samples']):
             raise ValueError('Esta imagen ya pertenece a otra muestra.')
         if any(e and e['path'] == asset['path'] for e in c['references']+[c['base_image']]):
-            raise ValueError('Las muestras de prueba deben ser independientes de las referencias.')
+            raise ValueError('Esta imagen corresponde a una OK. Repite la captura con una pieza NG.')
         if not messagebox.askyesno('Repetir fotografía',f"¿Reemplazar la foto de {entry['piece_id']} conservando sus detalles?",parent=self.root):
             return
         entry.update(asset,kind='full',captured_at=now())
@@ -2681,12 +2765,12 @@ class Application:
         selection = self.samples_table.selection()
         self.samples_table.delete(*self.samples_table.get_children())
         if self.draft:
-            for e in self.draft['samples']:
-                piece = e['piece_id'] + (' · identificar' if not e.get('identity_confirmed',True) else '')
+            for e in reference_samples(self.draft)+ng_samples(self.draft):
+                piece = e['piece_id']
                 self.samples_table.insert('','end',iid=e['id'],values=(piece,e['truth'],e.get('defect_type',''),e['note']))
         if selection and self.samples_table.exists(selection[0]):
             self.samples_table.selection_set(selection[0])
-        for truth in ('OK','NG'):
+        for truth in self.sample_galleries:
             entries = [e for e in (self.draft or {}).get('samples',[]) if e['truth'] == truth]
             sid = self.selected_sample_ids[truth]
             entry = next((e for e in entries if e['id'] == sid),None)
@@ -2714,12 +2798,20 @@ class Application:
 
     def view_sample(self):
         self._flush_photo_details()
+        selection = self.samples_table.selection()
+        if selection and selection[0].startswith('reference:'):
+            return self.view_reference(int(selection[0].split(':')[1]))
         e = self._selected_sample()
         self._show_image(self.store.image(self.model['id'],e),
                          f"{e['piece_id']} · real {e['truth']} · {e.get('defect_type','')} · {e.get('note','')}")
 
     @admin_action
     def edit_sample(self):
+        selection = self.samples_table.selection()
+        if selection and selection[0].startswith('reference:'):
+            self.select_reference(int(selection[0].split(':')[1]))
+            self.editor_tabs.select(self.reference_page)
+            return
         e = self._selected_sample()
         self._select_sample(e['id'])
         self.editor_tabs.select(self.sample_galleries[e['truth']]['page'])
@@ -2738,12 +2830,15 @@ class Application:
         if not self.model:
             return
         s = self.store.validation_summary(self.model)
-        unidentified = sum(not e.get('identity_confirmed',True) for e in self.model['config']['samples'])
+        c = self.model['config']
+        ok_count = sum(entry is not None for entry in c['references'])
+        ng_count = len(ng_samples(c))
         self.validation_info.configure(text=(
-            f"Versión guardada {self.model['version']} · piezas distintas OK: {s['ok_pieces']} / NG: {s['ng_pieces']}\n"
-            f"OK aceptadas: {s['ok_accepted']} · OK rechazadas: {s['ok_rejected']}\n"
-            f"NG rechazadas: {s['ng_rejected']} · NG aceptadas: {s['ng_accepted']}\n"
-            f"Sin evaluación: {s['unevaluated']} · Sin identificar: {unidentified}\nEstado: {self.store.status(self.model)}"))
+            f"Versión {self.model['version']} · guardadas: {ok_count}/10 OK y {ng_count}/10 NG\n"
+            f"OK de referencia comprobadas: {s['reference_total']}/10 · aceptadas: {s['reference_ok']} · rechazadas: {s['reference_ng']}\n"
+            f"NG comprobadas: {s['ng_photos']}/10 · detectadas: {s['ng_photo_rejected']} · aceptadas: {s['ng_photo_accepted']}\n"
+            f"Sin evaluación: {s['reference_unevaluated']+s['ng_photo_unevaluated']} · Estado: {self.store.status(self.model)}\n"
+            'Las OK son las referencias; este resultado no es una validación independiente.'))
 
     @admin_action
     def try_settings(self):
@@ -2769,23 +2864,24 @@ class Application:
         if self.dirty or canonical(self.draft) != canonical(self.model['config']):
             raise ValueError('Guarda o descarta los cambios antes de validar una versión.')
         m = self.store.read(self.model['id'])
-        if not m['config']['samples']:
-            raise ValueError('Agrega muestras OK y NG independientes y guarda primero.')
+        if len(ng_samples(m['config'])) != 10:
+            raise ValueError('Guarda 10 fotos OK y 10 fotos NG. Las mismas OK se usan como referencia.')
         def work():
             engine = VisionEngine(self.store,m)
             rows = []
-            for entry in m['config']['samples']:
+            for entry in reference_samples(m['config'])+ng_samples(m['config']):
                 image = self.store.image(m['id'],entry)
                 result,annotated,note = engine.evaluate_sample(image,entry)
                 details = ' · '.join(v for v in (entry.get('defect_type',''),entry.get('note','')) if v)
-                rows.append(self.store.record(m,result,kind='validation',operator='Administrador',
+                kind = 'reference_check' if entry['id'].startswith('reference:') else 'validation'
+                rows.append(self.store.record(m,result,kind=kind,operator='Administrador',
                     truth=entry['truth'],piece_id=entry['piece_id'],sample_id=entry['id'],image=image,
                     annotated=annotated,note=' | '.join(v for v in (note,details) if v)))
             return rows
         def done(rows):
             self._refresh_validation()
             self.message.set(f'{len(rows)} pruebas terminadas para la versión {m["version"]}. Revisa aciertos, errores y muestras sin evaluación.')
-        self._submit(work,done,'Ejecutando pruebas OK/NG sobre fotografías guardadas…')
+        self._submit(work,done,'Comprobando las 10 OK de referencia y las 10 NG…')
 
     @admin_action
     def approve_model(self):
@@ -3162,7 +3258,7 @@ def main():
     parser = argparse.ArgumentParser(description='Poka-Yoke 5 · Administración e inspección local')
     parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parent/'datos',
                         help='Ubicación de modelos, contraseña y registros; por defecto datos junto al programa')
-    parser.add_argument('--version',action='version',version='Poka-Yoke 5.1.0')
+    parser.add_argument('--version',action='version',version='Poka-Yoke 5.2.0')
     args = parser.parse_args()
     try:
         import tkinter as tk

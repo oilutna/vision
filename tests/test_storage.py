@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 import numpy as np
-from poka_yoke_mejorado5 import Store,Auth,READY,PENDING,canonical,atomic_json
+from poka_yoke_mejorado5 import Store,Auth,READY,PENDING,canonical,atomic_json,reference_samples
 from tests.helpers import make_model,add_samples,images,dummy_result,record_validation
 
 
@@ -156,6 +156,31 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.store.status(updated),PENDING)
         self.assertEqual(self.store.validation_summary(updated)['ok_pieces'],0)
         with self.assertRaises(ValueError):self.store.approve(m['id'],'Admin',aligned_references=10)
+
+    def test_ten_plus_ten_checks_block_unevaluated_and_false_ok_results(self):
+        m=add_samples(self.store,make_model(self.store),truths=('NG',))
+        refs=reference_samples(m['config'])
+        ng=m['config']['samples']
+        def record(entry,result,kind):
+            self.store.record(m,result,kind=kind,truth=entry['truth'],piece_id=entry['piece_id'],sample_id=entry['id'])
+        for e in refs:record(e,dummy_result(),'reference_check')
+        for i,e in enumerate(ng):record(e,None if i==0 else dummy_result(False),'validation')
+        s=self.store.validation_summary(m)
+        self.assertEqual(s['ng_photo_unevaluated'],1)
+        self.assertEqual(s['ng_photo_accepted'],0)
+        with self.assertRaises(ValueError):self.store.approve(m['id'],'Admin',aligned_references=10)
+        record(ng[0],dummy_result(False),'validation')
+        record(refs[0],None,'reference_check')
+        self.assertEqual(self.store.validation_summary(m)['reference_unevaluated'],1)
+        with self.assertRaises(ValueError):self.store.approve(m['id'],'Admin',aligned_references=10)
+        record(refs[0],dummy_result(),'reference_check')
+        record(ng[1],dummy_result(),'validation')
+        self.assertEqual(self.store.validation_summary(m)['ng_photo_accepted'],1)
+        with self.assertRaises(ValueError):self.store.approve(m['id'],'Admin',aligned_references=10)
+        record(ng[1],dummy_result(False),'validation')
+        result=self.store.approve(m['id'],'Admin',aligned_references=10)
+        self.assertEqual(self.store.status(result),READY)
+        self.assertFalse(result['validation']['independent_ok_validation'])
 
     def test_unevaluated_is_neither_false_accept_nor_reject(self):
         m=add_samples(self.store,make_model(self.store),n=1)

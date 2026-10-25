@@ -135,6 +135,37 @@ class GuiTests(unittest.TestCase):
         self.app._load_editor(saved)
         self.assertEqual(self.app.zone_fields['1'][0].get(),'Conector principal')
 
+    def test_zone_sliders_show_and_persist_their_own_thresholds(self):
+        self.admin();m=self.model_in_editor()
+        from tkinter import ttk
+        self.assertIsInstance(self.app.zone_scales['1'],ttk.Scale)
+        self.app.zone_scales['1'].set(200.7)
+        self.app.zone_scales['2'].set(75)
+        self.assertEqual(self.app.zone_values['1'].get(),'201 %')
+        self.assertEqual(self.app.zone_fields['1'][1].get(),'201')
+        self.assertEqual(self.app.store.read(m['id'])['config']['zones']['1']['factor'],100)
+        self.app.save_model()
+        saved=self.app.store.read(m['id'])
+        self.assertEqual(saved['config']['zones']['1']['factor'],201)
+        self.assertEqual(saved['config']['zones']['2']['factor'],75)
+        self.assertAlmostEqual(self.app.zone_scales['1'].get(),201)
+        self.assertFalse(self.app.dirty)
+        other=self.app.store.create('OTRO-NUMERO')
+        self.app._load_editor(other)
+        self.assertAlmostEqual(self.app.zone_scales['1'].get(),100)
+        self.app._load_editor(saved)
+        self.assertAlmostEqual(self.app.zone_scales['1'].get(),201)
+
+    def test_zone_sliders_follow_three_or_five_zone_selection(self):
+        self.admin();self.model_in_editor()
+        self.assertTrue(self.app.zone_scales['4'].instate(['disabled']))
+        self.assertFalse(self.app.zone_scales['3'].instate(['disabled']))
+        self.app.fields['zone_count'].set('5')
+        self.assertFalse(self.app.zone_scales['4'].instate(['disabled']))
+        self.assertFalse(self.app.zone_scales['5'].instate(['disabled']))
+        self.app.fields['zone_count'].set('3')
+        self.assertTrue(self.app.zone_scales['4'].instate(['disabled']))
+
     def test_unsaved_cancel_prevents_logout(self):
         self.admin();self.model_in_editor()
         self.app.fields['brightness'].set('12')
@@ -202,16 +233,20 @@ class GuiTests(unittest.TestCase):
         self.app._load_editor(saved)
         self.assertEqual(self.app.photo_fields['NG']['variables']['piece_id'].get(),'ENSAMBLE-03')
 
-    def test_ok_sample_button_is_independent_of_pattern_references(self):
+    def test_ok_capture_uses_the_same_ten_pattern_references(self):
         self.admin();m=self.model_in_editor()
+        c=copy.deepcopy(m['config']);c['references'][9]=None
+        self.app._load_editor(self.app.store.save(m['id'],c))
         frame=images()[1].copy();frame[0,0]=[7,8,9]
         self.camera.frame=frame
         with patch('poka_yoke_mejorado5.simpledialog.askstring',side_effect=AssertionError('Sin diálogo de clase')):
-            self.app.sample_galleries['OK']['capture'].invoke()
-        self.assertEqual(len(self.app.draft['samples']),1)
-        self.assertEqual(self.app.draft['samples'][0]['truth'],'OK')
-        self.assertEqual(self.app.draft['references'],m['config']['references'])
+            self.app.capture_ok_button.invoke()
+        self.assertEqual(self.app.draft['samples'],[])
+        self.assertEqual(sum(e is not None for e in self.app.draft['references']),10)
+        self.assertNotIn('OK',self.app.sample_galleries)
         self.assertEqual(len(self.app.sample_galleries['NG']['grid'].winfo_children()),0)
+        with self.assertRaisesRegex(ValueError,'10 referencias OK'):
+            self.app.capture_sample('OK')
 
     def test_photo_changes_are_kept_when_capturing_or_switching_thumbnails(self):
         self.admin();self.model_in_editor()
@@ -294,11 +329,40 @@ class GuiTests(unittest.TestCase):
         self.app._load_editor(m)
         self.app.run_validation();self.wait_idle()
         s=self.app.store.validation_summary(m)
-        self.assertEqual((s['ok_accepted'],s['ng_rejected']),(10,10))
+        self.assertEqual((s['reference_ok'],s['ng_photo_rejected']),(10,10))
+        self.assertEqual(s['ok_accepted'],0)
         with patch('poka_yoke_mejorado5.messagebox.askyesno',return_value=True):self.app.approve_model()
         self.wait_idle()
         self.assertIn(m['part'],self.app.op_models)
         self.assertIsNotNone(self.app.model['validation'])
+
+    def test_exactly_ten_ok_references_and_ten_ng_enable_inspection(self):
+        self.admin();m=self.model_in_editor()
+        for i in range(10):
+            frame=images()[2].copy();frame[0,0]=[30+i,10,20]
+            self.camera.frame=frame
+            self.app.capture_sample('NG')
+        self.assertEqual(len(self.app.draft['samples']),10)
+        self.assertTrue(all(s['truth']=='NG' for s in self.app.draft['samples']))
+        self.assertEqual(sum(bool(e) for e in self.app.draft['references']),10)
+        with self.assertRaisesRegex(ValueError,'10 fotos NG'):
+            self.app.capture_sample('NG')
+        self.assertEqual(len(self.app.draft['samples']),10)
+        self.app.save_model()
+        self.app.run_validation();self.wait_idle()
+        s=self.app.store.validation_summary(self.app.model)
+        self.assertEqual((s['reference_ok'],s['ng_photo_rejected']),(10,10))
+        self.assertEqual(s['ok_pieces'],0)
+        rows=self.app.store.events(model_id=m['id'])
+        self.assertEqual(len(rows),20)
+        self.assertEqual(sum(r['kind']=='reference_check' for r in rows),10)
+        self.assertEqual(sum(r['kind']=='validation' for r in rows),10)
+        with patch('poka_yoke_mejorado5.messagebox.askyesno',return_value=True):
+            self.app.approve_model()
+        self.wait_idle()
+        self.assertIn(m['part'],self.app.op_models)
+        self.assertFalse(self.app.model['validation']['independent_ok_validation'])
+        self.assertEqual(self.app.model['validation']['mode'],'reference_and_ng_check')
 
     def test_production_counts_once_and_disconnect_clears_screen(self):
         m=record_validation(self.app.store,add_samples(self.app.store,make_model(self.app.store)))

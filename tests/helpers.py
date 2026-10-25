@@ -2,7 +2,7 @@ import copy
 import uuid
 import numpy as np
 import cv2
-from poka_yoke_mejorado5 import defaults
+from poka_yoke_mejorado5 import defaults,reference_samples
 
 
 def images():
@@ -34,10 +34,12 @@ def make_model(store,part='PIEZA-01'):
     return store.save(m['id'],c)
 
 
-def add_samples(store,m,n=10):
+def add_samples(store,m,n=10,truths=('OK','NG')):
     _,frame,defect=images()
     c=copy.deepcopy(m['config'])
     for truth,base in [('OK',frame),('NG',defect)]:
+        if truth not in truths:
+            continue
         for i in range(n):
             sample=base.copy()
             sample[0,0]=[50+i,100,10 if truth=='OK' else 220]
@@ -53,6 +55,9 @@ def dummy_result(ok=True):
 
 
 def record_validation(store,m):
+    for s in reference_samples(m['config']):
+        store.record(m,dummy_result(),kind='reference_check',truth='OK',
+                     piece_id=s['piece_id'],sample_id=s['id'])
     for s in m['config']['samples']:
         store.record(m,dummy_result(s['truth']=='OK'),kind='validation',truth=s['truth'],
                      piece_id=s['piece_id'],sample_id=s['id'])
