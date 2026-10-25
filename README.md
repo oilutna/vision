@@ -1,6 +1,6 @@
 # Poka-Yoke 5
 
-Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. El programa completo está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.0.1**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. El programa completo está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
 
 ## Ejecutar
 
@@ -12,6 +12,16 @@ python poka_yoke_mejorado5.py
 ```
 
 En Windows puedes usar `py -3` en lugar de `python`.
+
+## Vista previa de cámara
+
+La cámara se abre automáticamente al iniciar, aunque no haya un modelo registrado. La vista previa no inicia la inspección ni incrementa contadores.
+
+El botón **Abrir / reconectar cámara** está visible en la parte superior. Si necesitas otro dispositivo, abre un modelo en Administración, selecciona su número de cámara y pulsa **Abrir cámara**. Al cargar un modelo también se abre su cámara automáticamente.
+
+En Windows, si un controlador abre el dispositivo pero no entrega imágenes, se intentan otras opciones de captura. Se espera el primer cuadro válido antes de mostrar la cámara como lista. El estado inferior informa el resultado; un fallo de lectura permite reconectar sin cerrar el programa.
+
+Para actualizar desde 5.0, cierra la aplicación y reemplaza únicamente `poka_yoke_mejorado5.py`, conservando tu carpeta `datos`.
 
 ## Uso inicial
 
@@ -39,6 +49,14 @@ La carpeta de datos está excluida de Git. Para respaldar todo, cierra el progra
 
 ## Verificación y límites
 
-Esta versión de archivo único pasó 45 pruebas automatizadas, incluidas pruebas de interfaz con cámara simulada y del motor OpenCV sobre imágenes sintéticas. No se verificó una cámara física ni su controlador de Windows.
+Esta versión de archivo único pasó 51 pruebas automatizadas, incluidas pruebas de interfaz con cámara simulada y del motor OpenCV sobre imágenes sintéticas. No se verificó una cámara física ni su controlador de Windows.
 
 Comprueba en tu equipo enfoque, iluminación, resolución, velocidad y resultados con piezas reales. Las pruebas iniciales no garantizan una tasa de detección para todos los defectos. La presencia y el retiro se estiman visualmente; no hay un sensor físico de presencia. El motor indica diferencias por zona, sin diagnosticar automáticamente el tipo de defecto.
+
+## Ejecutar las pruebas
+
+```sh
+python -m unittest discover -v
+```
+
+Las pruebas de interfaz necesitan una sesión gráfica. Sin ella se marcan omitidas; no se consideran ejecutadas. Las pruebas usan cámaras simuladas y no activan tu cámara física.

@@ -1119,6 +1119,8 @@ class Camera:
         self.timestamp = 0.
         self.info = {'status': 'Cámara sin abrir', 'ready': False, 'generation': 0, 'properties': {}}
         self.generation = 0
+        self._first_frame = None
+        self._backend_name = 'Automático'
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, name='camara-pokayoke', daemon=True)
         self.thread.start()
@@ -1150,36 +1152,75 @@ class Camera:
             self.info.update(info)
             self.info['generation'] = generation
 
+    @staticmethod
+    def backend_candidates():
+        options = [(cv2.CAP_ANY, 'Automático')]
+        if os.name == 'nt':
+            options += [(cv2.CAP_DSHOW, 'DirectShow'), (cv2.CAP_MSMF, 'Media Foundation')]
+        return options
+
+    @staticmethod
+    def _valid_frame(frame):
+        return (isinstance(frame,np.ndarray) and frame.ndim == 3
+                and frame.shape[2] == 3 and frame.size > 0)
+
     def _open(self, settings):
-        cap = cv2.VideoCapture(settings['index'])
-        if not cap.isOpened():
-            cap.release()
-            raise RuntimeError('No se pudo abrir la cámara seleccionada. Comprueba conexión y número de cámara.')
-        try:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings['width'])
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, settings['height'])
-            props = {}
-            for key, prop, auto in (
-                ('exposure', cv2.CAP_PROP_EXPOSURE, cv2.CAP_PROP_AUTO_EXPOSURE),
-                ('focus', cv2.CAP_PROP_FOCUS, cv2.CAP_PROP_AUTOFOCUS),
-                ('white_balance', cv2.CAP_PROP_WB_TEMPERATURE, cv2.CAP_PROP_AUTO_WB)):
-                requested = settings.get(key)
-                if requested is not None:
-                    # Auto-exposure values are backend-specific; probe both common conventions.
-                    if key == 'exposure':
-                        cap.set(auto, .25)
-                    else:
-                        cap.set(auto, 0)
-                    accepted = bool(cap.set(prop, requested))
-                    actual = float(cap.get(prop))
-                    verified = accepted and abs(actual-requested) <= max(.05, abs(requested)*.02)
-                    props[key] = {'requested': requested, 'actual': actual, 'verified': verified}
-                else:
-                    props[key] = {'requested': None, 'actual': float(cap.get(prop)), 'verified': None}
-            return cap, props
-        except Exception:
-            cap.release()
-            raise
+        self._first_frame = None
+        failures = []
+        for backend,name in self.backend_candidates():
+            if self.stop_event.is_set():
+                raise RuntimeError('Apertura de cámara cancelada.')
+            cap = None
+            try:
+                cap = (cv2.VideoCapture(settings['index']) if backend == cv2.CAP_ANY
+                       else cv2.VideoCapture(settings['index'],backend))
+                if not cap.isOpened():
+                    raise RuntimeError('dispositivo no disponible')
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings['width'])
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, settings['height'])
+                # Algunas webcams necesitan varios intentos para entregar su primer cuadro.
+                frame = None
+                for _ in range(8):
+                    if self.stop_event.is_set():
+                        raise RuntimeError('apertura cancelada')
+                    ok,candidate = cap.read()
+                    if ok and self._valid_frame(candidate):
+                        frame = candidate
+                        break
+                    self.stop_event.wait(.05)
+                if frame is None:
+                    raise RuntimeError('abierta, pero sin imágenes')
+                props = self._configure_properties(cap,settings)
+                self._first_frame = frame
+                self._backend_name = name
+                return cap,props
+            except Exception as e:
+                failures.append(f'{name}: {e}')
+                if cap is not None:
+                    cap.release()
+        raise RuntimeError(
+            f'No se obtiene imagen de la cámara {settings["index"]}. '
+            'Comprueba el número de cámara en Administración, cierra otras aplicaciones que la usen '
+            'y revisa el permiso de cámara para aplicaciones de escritorio en Windows. '
+            + ' | '.join(failures))
+
+    def _configure_properties(self,cap,settings):
+        props = {}
+        for key, prop, auto in (
+            ('exposure', cv2.CAP_PROP_EXPOSURE, cv2.CAP_PROP_AUTO_EXPOSURE),
+            ('focus', cv2.CAP_PROP_FOCUS, cv2.CAP_PROP_AUTOFOCUS),
+            ('white_balance', cv2.CAP_PROP_WB_TEMPERATURE, cv2.CAP_PROP_AUTO_WB)):
+            requested = settings.get(key)
+            if requested is not None:
+                # La escala de exposición depende del controlador; verificar la lectura real.
+                cap.set(auto, .25 if key == 'exposure' else 0)
+                accepted = bool(cap.set(prop, requested))
+                actual = float(cap.get(prop))
+                verified = accepted and abs(actual-requested) <= max(.05, abs(requested)*.02)
+                props[key] = {'requested': requested, 'actual': actual, 'verified': verified}
+            else:
+                props[key] = {'requested': None, 'actual': float(cap.get(prop)), 'verified': None}
+        return props
 
     def _run(self):
         cap = None
@@ -1206,8 +1247,18 @@ class Camera:
                 if cap is None:
                     self.stop_event.wait(.03)
                     continue
-                ret, frame = cap.read()
-                if not ret or frame is None:
+                try:
+                    if self._first_frame is not None:
+                        frame,self._first_frame = self._first_frame,None
+                        ret = True
+                    else:
+                        ret,frame = cap.read()
+                except Exception as e:
+                    self._publish(generation,ready=False,status=f'Error al leer la cámara: {e}. Pulsa Abrir / reconectar cámara.')
+                    cap.release()
+                    cap = None
+                    continue
+                if not ret or not self._valid_frame(frame):
                     self._publish(generation, ready=False, status='Cámara sin imagen. Revisa la conexión y pulsa Abrir cámara.')
                     cap.release()
                     cap = None
@@ -1215,13 +1266,14 @@ class Camera:
                 h, w = frame.shape[:2]
                 mismatch = (w,h) != (settings['width'],settings['height'])
                 failed = [key for key,v in props.items() if v['verified'] is False]
-                status = f'Cámara {settings["index"]} · resolución real {w} × {h}'
+                status = f'Cámara {settings["index"]} · {self._backend_name} · resolución real {w} × {h}'
                 if mismatch:
                     status += ' · resolución solicitada no aceptada'
                 if failed:
                     status += ' · ajustes no comprobados: '+', '.join(failed)
                 self._publish(generation, frame, ready=True, status=status,
-                              width=w, height=h, compatible=not mismatch and not failed, properties=props)
+                              width=w, height=h, compatible=not mismatch and not failed,
+                              properties=props,backend=self._backend_name)
                 self.stop_event.wait(.01)
         except Exception as e:
             self._publish(generation, ready=False, status=f'Error de cámara: {e}')
@@ -1456,6 +1508,8 @@ class Application:
         self.mode_label.pack(side='left',padx=18)
         self.access_button = ttk.Button(header,text='Administración',command=self.toggle_admin)
         self.access_button.pack(side='right')
+        self.camera_button = ttk.Button(header,text='Abrir / reconectar cámara',command=self.reconnect_camera)
+        self.camera_button.pack(side='right',padx=8)
         self.body = ttk.Frame(root,padding=(12,0))
         self.body.pack(fill='both',expand=True)
         self.ops = ttk.Frame(self.body)
@@ -1471,6 +1525,8 @@ class Application:
         ttk.Label(footer,textvariable=self.camera_status,style='Muted.TLabel',wraplength=1200).pack(anchor='w')
         self._refresh_catalog()
         self.poll_id = self.root.after(80,self._poll)
+        # La vista previa es independiente de preparar o validar un modelo.
+        self._configure_preview(defaults()['camera'])
 
     def _style(self):
         s = ttk.Style(self.root)
@@ -1798,6 +1854,7 @@ class Application:
             self._refresh_validation()
         finally:
             self.loading = False
+        self._configure_preview(c['camera'])
 
     def _resolve_dirty(self):
         if not self.dirty:
@@ -2080,9 +2137,38 @@ class Application:
     @admin_action
     def open_camera(self):
         c = self._sync()
-        self.generation = self.camera.configure(c['camera'])
-        self.camera_requested = copy.deepcopy(c['camera'])
+        self._configure_preview(c['camera'],force=True)
         self.message.set('Abriendo cámara. Comprueba la resolución y los ajustes reales en el estado inferior.')
+
+    def _configure_preview(self,settings,force=False):
+        if self.closed:
+            return
+        _,_,info = self.camera.snapshot()
+        if (not force and getattr(self,'camera_requested',None) == settings
+                and (info.get('ready') or 'Abriendo' in info.get('status',''))):
+            return
+        self.generation = self.camera.configure(settings)
+        self.camera_requested = copy.deepcopy(settings)
+        self.camera_status.set('Abriendo cámara…')
+
+    def reconnect_camera(self):
+        if self.closed:
+            return
+        if self.running or getattr(self,'pending_start',False):
+            self.pause()
+        if self.admin_mode and self.model is not None:
+            # Reutiliza la validación y los ajustes del editor sin guardarlos.
+            if self.task is not None:
+                raise ValueError('Espera la operación en curso antes de reconectar la cámara.')
+            settings = self._sync()['camera']
+        elif self.active_model is not None:
+            settings = self.active_model['config']['camera']
+        else:
+            settings = defaults()['camera']
+        if self.cycle is not None:
+            self.executor.submit(self.cycle.disconnected)
+        self._configure_preview(settings,force=True)
+        self.message.set('Abriendo vista previa. La inspección permanece pausada; comprueba la imagen antes de iniciar.')
 
     @admin_action
     def use_actual_resolution(self):
@@ -2427,6 +2513,7 @@ class Application:
         self._clear_result('Modelo cargado · inspección pausada')
         m = self.active_model
         if m:
+            self._configure_preview(m['config']['camera'])
             self.op_description.configure(text=f"{m['part']} · {m['description']} · configuración v{m['version']}")
             entry = next((e for e in m['config']['references'] if e),None)
             if entry:
@@ -2766,7 +2853,7 @@ def main():
     parser = argparse.ArgumentParser(description='Poka-Yoke 5 · Administración e inspección local')
     parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parent/'datos',
                         help='Ubicación de modelos, contraseña y registros; por defecto datos junto al programa')
-    parser.add_argument('--version',action='version',version='Poka-Yoke 5.0')
+    parser.add_argument('--version',action='version',version='Poka-Yoke 5.0.1')
     args = parser.parse_args()
     try:
         import tkinter as tk
