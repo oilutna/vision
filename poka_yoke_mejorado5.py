@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Poka-Yoke 5.2.0 — archivo único: Administración e Inspección.
+"""Poka-Yoke 5.3.0 — archivo único: Administración e Inspección.
 
 Ejecutar: python poka_yoke_mejorado5.py
 Dependencias: python -m pip install numpy opencv-python Pillow
@@ -245,7 +245,9 @@ class Store:
                 part TEXT NOT NULL, version INTEGER NOT NULL, fingerprint TEXT NOT NULL,
                 kind TEXT NOT NULL, operator TEXT, lot TEXT, work_order TEXT,
                 outcome TEXT NOT NULL, truth TEXT, piece_id TEXT, sample_id TEXT,
-                image TEXT, annotated TEXT, result TEXT NOT NULL, note TEXT)''')
+                image TEXT, annotated TEXT, result TEXT NOT NULL, note TEXT, diagnostic TEXT)''')
+            if 'diagnostic' not in {row[1] for row in db.execute('PRAGMA table_info(events)')}:
+                db.execute('ALTER TABLE events ADD COLUMN diagnostic TEXT')
             db.execute('CREATE INDEX IF NOT EXISTS event_model ON events(model_id, version, kind)')
         self.catalog_errors = []
 
@@ -531,7 +533,7 @@ class Store:
             raise
 
     def record(self, m, result, *, kind='production', operator='', lot='', work_order='',
-               truth=None, piece_id='', sample_id='', image=None, annotated=None, note=''):
+               truth=None, piece_id='', sample_id='', image=None, annotated=None, note='',diagnostic=''):
         if kind not in ('production', 'validation', 'test', 'manual', 'reference_check'):
             raise ValueError('Tipo de evaluación inválido.')
         if truth not in (None, 'OK', 'NG'):
@@ -556,7 +558,7 @@ class Store:
                        fingerprint=canonical(m['config']), kind=kind, operator=operator, lot=lot,
                        work_order=work_order, outcome=outcome, truth=truth, piece_id=piece_id,
                        sample_id=sample_id, image=files[0], annotated=files[1],
-                       result=json.dumps(result, ensure_ascii=False, allow_nan=False), note=note)
+                       result=json.dumps(result, ensure_ascii=False, allow_nan=False), note=note,diagnostic=diagnostic)
             with self.connect() as db:
                 columns = ','.join(row)
                 db.execute(f'INSERT INTO events ({columns}) VALUES ({",".join("?" for _ in row)})', list(row.values()))
@@ -590,6 +592,20 @@ class Store:
             counts = {r['outcome']: r['n'] for r in rows}
         ok, ng = counts.get('OK', 0), counts.get('NG', 0)
         return ok, ng
+
+    def photo_results(self,m):
+        entries = {e['id']:e for e in reference_samples(m['config'])+ng_samples(m['config'])}
+        report = {}
+        for kind in ('reference_check','validation'):
+            for row in self.events(model_id=m['id'],kind=kind,limit=100000):
+                sid = row['sample_id']
+                if (sid in report or sid not in entries or row['version'] != m['version']
+                        or row['fingerprint'] != canonical(m['config']) or row['truth'] != entries[sid]['truth']):
+                    continue
+                info = describe_photo_result(entries[sid],row)
+                info.update(row_id=row['id'],path=entries[sid]['path'])
+                report[sid] = info
+        return report
 
     def validation_summary(self, m):
         rows = self.events(model_id=m['id'], kind='validation', limit=100000)
@@ -679,6 +695,85 @@ class Store:
                     # Prevent spreadsheet formula execution when opening operator-provided fields.
                     values.append("'" + val if val.startswith(('=', '+', '-', '@')) else val)
                 writer.writerow(values)
+
+def describe_photo_result(entry,row):
+    expected = entry['truth']
+    result = json.loads(row['result']) if isinstance(row.get('result'),str) else row.get('result')
+    outcome,code = row['outcome'],row.get('diagnostic') or ''
+    note = row.get('note') or ''
+    if outcome == 'SIN_EVALUACION':
+        invalid = code in ('INVALID_PHOTO','NOT_NG','REFERENCE_ALIGNMENT')
+        label = 'NO CUENTA COMO NG' if code == 'NOT_NG' else ('FOTO INVÁLIDA' if invalid else 'SIN EVALUAR')
+        return dict(state='fail' if invalid else 'unevaluated',label=label,
+                    reason=note or 'No se pudo evaluar esta fotografía.',match=None)
+    match = result.get('match') if result else None
+    if outcome != expected:
+        label = 'NG pasa como OK' if expected == 'NG' else 'OK pasa como NG'
+        reason = ('Está etiquetada NG, pero el detector la acepta como OK. Revisa las zonas y el umbral: el defecto no fue detectado.'
+                  if expected == 'NG' else 'Está etiquetada OK, pero el detector la rechaza. Revisa posición, iluminación, zonas y umbrales.')
+        if result:
+            failed = [z.get('name',f"Zona {z['idx']}") for z in result.get('zonas',[]) if not z['ok']]
+            if failed:
+                reason += ' Diferencias en: '+', '.join(failed)+'.'
+        return dict(state='fail',label=label,reason=reason,match=match)
+    return dict(state='pass',label='OK correcta' if expected == 'OK' else 'NG detectada',
+                reason='El resultado coincide con la etiqueta de esta fotografía.',match=match)
+
+
+class ReferencePreparationError(ValueError):
+    def __init__(self,message,issues):
+        super().__init__(message)
+        self.issues = issues
+
+
+def check_saved_photos(store,model):
+    """Registra cada resultado, incluso fotos inválidas; una NG no impide evaluar las demás."""
+    engine,issues,model_error = None,{},''
+    try:
+        engine = VisionEngine(store,model)
+    except ReferencePreparationError as error:
+        issues = error.issues
+        model_error = str(error)
+    except (ValueError,OSError,cv2.error) as error:
+        model_error = str(error)
+    c = model['config']
+    ref_paths = {e['path'] for e in c['references']+[c['base_image']] if e}
+    seen_ng = set()
+    rows = []
+    for entry in reference_samples(c)+ng_samples(c):
+        sid = entry['id']
+        image = annotated = result = None
+        note,code = '', ''
+        try:
+            image = store.image(model['id'],entry)
+            if sid in issues:
+                note,code = issues[sid],'REFERENCE_ALIGNMENT'
+            elif entry['truth'] == 'NG' and entry['path'] in ref_paths:
+                note,code = 'Esta imagen es idéntica a una OK; no cuenta como foto NG. Repite su captura.','NOT_NG'
+            elif entry['truth'] == 'NG' and entry['path'] in seen_ng:
+                note,code = 'Esta foto NG repite exactamente otra imagen; no cuenta como otra foto NG.','NOT_NG'
+            else:
+                if entry['truth'] == 'NG':
+                    seen_ng.add(entry['path'])
+                expected_shape = (c['roi'][3]-c['roi'][1],c['roi'][2]-c['roi'][0]) if entry['kind']=='crop' and c['roi'] else (
+                    c['camera']['height'],c['camera']['width'])
+                if image.shape[:2] != expected_shape:
+                    note,code = 'El tamaño de esta foto no coincide con la región o resolución del modelo. Repite su captura.','INVALID_PHOTO'
+                elif engine is None:
+                    note,code = 'No se pudo formar el patrón OK: '+model_error,'MODEL_UNAVAILABLE'
+                else:
+                    result,annotated,note = engine.evaluate_sample(image,entry)
+                    if result is None:
+                        code = 'LOW_MATCH'
+        except (ValueError,OSError,cv2.error) as error:
+            note,code = 'Foto ausente, dañada o incompatible: '+str(error),'INVALID_PHOTO'
+        details = ' · '.join(v for v in (entry.get('defect_type',''),entry.get('note','')) if v)
+        kind = 'reference_check' if sid.startswith('reference:') else 'validation'
+        rows.append(store.record(model,result,kind=kind,operator='Administrador',truth=entry['truth'],
+                    piece_id=entry['piece_id'],sample_id=sid,image=image,annotated=annotated,
+                    diagnostic=code,note=' | '.join(v for v in (note,details) if v)))
+    return rows
+
 
 
 class Auth:
@@ -957,21 +1052,33 @@ class OriginalVision:
 class VisionEngine(OriginalVision):
     def __init__(self, store, model):
         self.model = copy.deepcopy(model)
+        missing = {f'reference:{i}':'Falta esta foto OK de referencia.'
+                   for i,e in enumerate(model['config']['references']) if e is None}
+        if missing:
+            raise ReferencePreparationError('Se necesitan las 10 fotos OK de referencia.',missing)
         self.config = c = validate_config(self.model['config'], True)
-        store.integrity(model, True)
         self.zonas_relativas = {str(i): c['zones'][str(i)]['rect'] for i in range(1, c['zone_count']+1)}
         self.factores_zona = {str(i): c['zones'][str(i)]['factor'] for i in range(1, c['zone_count']+1)}
         self._kernel_morf = np.ones((3, 3), np.uint8)
         self._ultimo_ajuste = None
-        refs = []
-        for e in c['references']:
-            img = store.image(model['id'], e)
-            refs.append(img if e.get('processed') else self.adjust(img))
+        refs,issues = [],{}
+        x1,y1,x2,y2 = c['roi']
+        for i,e in enumerate(c['references']):
+            try:
+                img = store.image(model['id'], e)
+                if img.shape[:2] != (y2-y1,x2-x1):
+                    raise ValueError('El tamaño no coincide con la región de referencia.')
+                refs.append(img if e.get('processed') else self.adjust(img))
+            except (ValueError,OSError,cv2.error) as error:
+                issues[f'reference:{i}'] = str(error)
+        if issues:
+            raise ReferencePreparationError('Hay fotos OK inválidas; revisa las miniaturas marcadas.',issues)
         if len(refs) != 10:
             raise ValueError('Se necesitan 10 referencias OK.')
         base_L = cv2.cvtColor(refs[0], cv2.COLOR_BGR2LAB)[..., 0]
         if float(base_L.std()) < 1:
-            raise ValueError('La referencia 1 no tiene contraste suficiente para localizar la pieza.')
+            raise ReferencePreparationError('La referencia 1 no tiene contraste suficiente para localizar la pieza.',
+                                            {'reference:0':'La foto no tiene contraste suficiente. Repite la captura con iluminación y enfoque adecuados.'})
         h, w = refs[0].shape[:2]
         aligned, bad = [refs[0]], []
         for i, ref in enumerate(refs[1:], 2):
@@ -982,7 +1089,8 @@ class VisionEngine(OriginalVision):
                 aligned.append(cv2.warpAffine(ref, matrix, (w, h), flags=cv2.INTER_LINEAR,
                                                borderMode=cv2.BORDER_REPLICATE))
         if bad:
-            raise ValueError('No se pudieron alinear estas referencias OK: '+', '.join(map(str, bad))+'. Reemplázalas.')
+            raise ReferencePreparationError('No se pudieron alinear estas referencias OK: '+', '.join(map(str, bad))+'. Reemplázalas.',
+                {f'reference:{i-1}':'Esta foto OK no se alinea con la primera referencia. Revisa posición, orientación y enfoque.' for i in bad})
         stack = np.stack([cv2.GaussianBlur(cv2.cvtColor(r, cv2.COLOR_BGR2LAB), (5, 5), 0).astype(np.float32) for r in aligned])
         mean = stack.mean(axis=0)
         u8 = np.clip(mean, 0, 255).astype(np.uint8)
@@ -1342,8 +1450,9 @@ from PIL import Image, ImageTk
 
 
 class ImageCanvas(tk.Canvas):
-    def __init__(self, parent, **kw):
+    def __init__(self, parent, empty_text='Sin imagen de cámara', **kw):
         super().__init__(parent, bg='#0a111d', highlightthickness=0, **kw)
+        self.empty_text = empty_text
         self.source = None
         self.scale_factor = 1.
         self.offset = (0,0)
@@ -1357,7 +1466,7 @@ class ImageCanvas(tk.Canvas):
         self.delete('all')
         if self.source is None:
             self.create_text(max(100,self.winfo_width()/2), max(80,self.winfo_height()/2),
-                             text='Sin imagen de cámara', fill='#91a1b9', font=('Segoe UI',14))
+                             text=self.empty_text, fill='#91a1b9', font=('Segoe UI',14))
             return
         h,w = self.source.shape[:2]
         cw,ch = max(10,self.winfo_width()),max(10,self.winfo_height())
@@ -1540,6 +1649,14 @@ class Application:
         self.last_event = None
         self.gallery_slot = 0
         self.thumbnails = []
+        self.photo_report = {}
+        self.report_idle_id = None
+        self.live_running = False
+        self.live_generation = 0
+        self.live_future = None
+        self.live_cycle = None
+        self.live_output = None
+        self.live_last_stamp = 0.
         self.root.title('Poka-Yoke 5 · Inspección y administración')
         width = min(1320,max(800,self.root.winfo_screenwidth()-40))
         height = min(840,max(600,self.root.winfo_screenheight()-40))
@@ -1597,6 +1714,10 @@ class Application:
         s.configure('TEntry',padding=5)
         s.configure('TCombobox',padding=5)
         s.map('TCombobox',fieldbackground=[('readonly','#1e3049')],foreground=[('readonly','#e7eef9')])
+        for name,color in [('Pass','#1c5545'),('Fail','#7b293b'),('Warning','#6c4d1c'),('Pending','#243954')]:
+            s.configure('Photo'+name+'.TButton',background=color,foreground='#ffffff',borderwidth=3)
+            s.map('Photo'+name+'.TButton',background=[('active',color),('pressed',color)])
+        self.samples_colors = {'fail':'#692739','unevaluated':'#604919','pass':'#174436','pending':'#243954'}
 
     def _build_operations(self):
         top = ttk.Frame(self.ops,padding=10)
@@ -1775,8 +1896,11 @@ class Application:
         row.pack(fill='x')
         button(row,'Dibujar región general',self.edit_roi)
         button(row,'Abrir / reconectar cámara',self.open_camera)
+        self.live_button = button(row,'Probar inspección en vivo',self.toggle_live_test)
         self.roi_label = ttk.Label(preview_controls,text='Región: sin configurar',padding=(6,2))
         self.roi_label.pack(fill='x')
+        self.live_status = ttk.Label(preview_controls,text='Prueba en vivo detenida · no modifica producción',padding=(6,2),wraplength=780)
+        self.live_status.pack(fill='x')
         self.editor_tabs = ttk.Notebook(right)
         right.add(self.editor_tabs,weight=3)
         self.photo_fields = {}
@@ -1833,8 +1957,8 @@ class Application:
             grid = thumbnails.inner
             nav = ttk.Frame(left)
             nav.pack(side='bottom',fill='x',before=thumbnails)
-            previous = button(nav,'‹',lambda value=truth:self.sample_page(value,-1))
-            next_button = button(nav,'›',lambda value=truth:self.sample_page(value,1))
+            previous = button(nav,'Anterior',lambda value=truth:self.sample_page(value,-1))
+            next_button = button(nav,'Siguiente',lambda value=truth:self.sample_page(value,1))
             info = ttk.Label(nav,text='Sin fotografías')
             info.pack(side='left',padx=4)
             self.sample_galleries[truth] = dict(page=page,grid=grid,offset=0,images=[],scroller=thumbnails,
@@ -1847,19 +1971,24 @@ class Application:
         self.editor_tabs.add(validation_scroll,text='Comprobación')
         ttk.Label(validation,text='Se comprueban las mismas 10 OK de referencia y 10 NG. No necesitas capturar más fotos OK.',
                   wraplength=650).pack(fill='x',pady=4)
-        self.samples_table = table(validation,[('piece','Pieza',120),('truth','Real',55),
+        self.samples_table = table(validation,[('piece','Pieza',100),('truth','Real',55),('check','Resultado de foto',150),
                                   ('defect','Tipo de defecto',140),('note','Notas',180)],height=5)
+        for state,color in self.samples_colors.items():
+            self.samples_table.tag_configure(state,background=color,foreground='#ffffff')
         self.samples_table.bind('<Double-1>',lambda e:self.edit_sample())
         row = ttk.Frame(validation)
         row.pack(fill='x',pady=4)
         button(row,'Ver fotografía',self.view_sample)
         button(row,'Editar detalles',self.edit_sample)
+        button(row,'Siguiente foto con problema',self.show_problem_photo)
         row = ttk.Frame(validation)
         row.pack(fill='x')
         button(row,'Comprobar 10 OK + 10 NG',self.run_validation)
         button(row,'Habilitar versión para inspección',self.approve_model)
         self.validation_info = ttk.Label(validation,text='Sin pruebas de esta versión.',wraplength=650,justify='left',padding=8)
         self.validation_info.pack(fill='x')
+        ttk.Label(validation,text='Verde: resultado correcto · Rojo: error · Ámbar: sin evaluar o resultado anterior.',
+                  style='Muted.TLabel',wraplength=650).pack(fill='x')
         ttk.Label(validation,text='Las OK se reutilizan para formar y comprobar la referencia. '
                   'Es una comprobación de ajuste; no mide el desempeño con piezas nuevas.',
                   wraplength=650,style='Muted.TLabel').pack(fill='x',pady=8)
@@ -1885,12 +2014,94 @@ class Application:
         button(row,'Aplicar detalles',
                lambda value=key:self.apply_photo_details(value))
         button(row,'Ampliar',lambda value=key:self.view_photo(value))
-        ttk.Label(box,text='Misma pieza física = mismo ID.',style='Muted.TLabel').grid(row=5,column=0,columnspan=2,sticky='w')
+        diagnosis = ttk.Label(box,text='',wraplength=290)
+        diagnosis.grid(row=5,column=0,columnspan=2,sticky='w',pady=(2,0))
         box.columnconfigure(1,weight=1)
-        self.photo_fields[key] = dict(variables=variables,title=title,widgets=[piece,defect,note])
+        self.photo_fields[key] = dict(variables=variables,title=title,widgets=[piece,defect,note],diagnosis=diagnosis)
         for var in variables.values():
             var.trace_add('write',lambda *args,value=key:self._photo_edited(value))
         self._fill_photo_details(key,None)
+
+    def _load_photo_report(self):
+        self.photo_report = self.store.photo_results(self.model) if self.model else {}
+
+    def _cache_photo_issue(self,sid,entry,error):
+        previous = self.photo_report.get(sid,{})
+        info = dict(previous) if previous.get('path') == entry['path'] else {}
+        info.update(state='fail',label='FOTO ILEGIBLE',reason='No se puede leer esta foto: '+str(error),
+                    path=entry['path'],match=None,local_read_error=True)
+        self.photo_report[sid] = info
+
+    def _photo_diagnostic(self,sid,entry):
+        if entry is None:
+            return dict(state='fail' if self.model else 'pending',label='SIN FOTO',reason='Falta capturar esta foto OK.')
+        info = self.photo_report.get(sid)
+        if info and info.get('path') == entry['path']:
+            info = dict(info)
+            if self.dirty and not info.get('local_read_error'):
+                info.update(state='stale',label=info['label']+' (anterior)',
+                            reason='Resultado anterior: guarda los cambios y vuelve a comprobar. '+info['reason'])
+            return info
+        return dict(state='pending',label='SIN COMPROBAR',reason='Esta foto no tiene una comprobación de la configuración actual.')
+
+    @staticmethod
+    def _photo_style(info):
+        return 'Photo'+{'pass':'Pass','fail':'Fail','unevaluated':'Warning','stale':'Warning','pending':'Pending'}[info['state']]+'.TButton'
+
+    def _decorate_photo(self,widget,sid,entry,text):
+        info = self._photo_diagnostic(sid,entry)
+        widget.photo_sid,widget.photo_entry,widget.photo_text = sid,entry,text
+        widget.configure(style=self._photo_style(info),text=text+'\n'+info['label'])
+
+    def _update_photo_indicators(self):
+        widgets = list(self.ref_buttons)
+        for gallery in self.sample_galleries.values():
+            widgets += list(gallery['grid'].winfo_children())
+        for widget in widgets:
+            if hasattr(widget,'photo_sid'):
+                self._decorate_photo(widget,widget.photo_sid,widget.photo_entry,widget.photo_text)
+        if self.draft:
+            for entry in reference_samples(self.draft)+ng_samples(self.draft):
+                if self.samples_table.exists(entry['id']):
+                    info = self._photo_diagnostic(entry['id'],entry)
+                    self.samples_table.set(entry['id'],'check',info['label'])
+                    self.samples_table.item(entry['id'],tags=('unevaluated' if info['state']=='stale' else info['state'],))
+        for key,panel in self.photo_fields.items():
+            entry = self._photo_entry(key)
+            sid = f'reference:{self.gallery_slot}' if key == 'reference' else self.photo_targets.get(key)
+            info = self._photo_diagnostic(sid,entry) if sid else dict(state='pending',label='',reason='')
+            color = {'pass':'#35e0b5','fail':'#ff7b8d','unevaluated':'#ffcb78','stale':'#ffcb78','pending':'#9cabc1'}[info['state']]
+            short = info['label']
+            if info.get('match') is not None:
+                short += f" · coincidencia {info['match']:.2f}"
+            panel['diagnosis'].configure(text=short,foreground=color)
+
+    def _run_report_idle(self):
+        self.report_idle_id = None
+        if not self.closed:
+            self._update_photo_indicators()
+
+    def show_problem_photo(self):
+        self._need_model()
+        problems = [sid for sid,info in self.photo_report.items() if info['state'] in ('fail','unevaluated')]
+        problems.sort(key=lambda sid:(self.photo_report[sid]['state']!='fail',sid))
+        if not problems:
+            self.message.set('No hay fotos con error en la última comprobación de esta versión.')
+            return
+        previous = getattr(self,'last_problem_sid',None)
+        pos = (problems.index(previous)+1)%len(problems) if previous in problems else 0
+        sid = problems[pos]
+        self.last_problem_sid = sid
+        if sid.startswith('reference:'):
+            index = int(sid.split(':')[1])
+            self.select_reference(index)
+            self.editor_tabs.select(self.reference_page)
+            self.reference_scroller.inner.master.yview_moveto((index//2)/5)
+        else:
+            self._select_sample(sid)
+            self.editor_tabs.select(self.sample_galleries['NG']['page'])
+            self.sample_galleries['NG']['scroller'].inner.master.yview_moveto(0)
+        self.message.set(f"Foto con problema {pos+1}/{len(problems)}: "+self.photo_report[sid]['reason'])
 
     def _photo_entry(self,key):
         if self.draft is None:
@@ -1924,6 +2135,8 @@ class Application:
             caption = ('Referencia OK '+str(int(target)+1)) if key == 'reference' and entry else (
                       f"Foto {key} · {entry['piece_id']}" if entry else 'Selecciona una miniatura o captura una fotografía.')
             panel['title'].configure(text=caption)
+            if hasattr(self,'ref_buttons'):
+                self._update_photo_indicators()
         finally:
             self._photo_loading = False
 
@@ -1968,8 +2181,17 @@ class Application:
         entry = self._photo_entry(key)
         if entry is None:
             raise ValueError('Selecciona primero una miniatura.')
+        sid = f'reference:{self.gallery_slot}' if key == 'reference' else entry['id']
+        info = self._photo_diagnostic(sid,entry)
+        if info.get('row_id') and not info.get('local_read_error'):
+            self._show_event(self._event_by_id(info['row_id']))
+            return
         title = f"{entry.get('piece_id','Referencia OK')} · {entry.get('defect_type','')} · {entry.get('note','')} · {entry.get('captured_at','')}"
-        self._show_image(self.store.image(self.model['id'],entry),title)
+        try:
+            image = self.store.image(self.model['id'],entry)
+        except (ValueError,OSError,cv2.error):
+            image = None
+        self._show_image(image,title,info['reason'])
 
     def _select_sample(self,sid):
         self._flush_photo_details()
@@ -2010,12 +2232,13 @@ class Application:
             try:
                 photo = self._thumbnail(self.store.image(self.model['id'],entry),(105,60))
                 gallery['images'].append(photo)
-            except (OSError,ValueError):
-                text += '\nImagen inválida'
+            except (OSError,ValueError,cv2.error) as error:
+                self._cache_photo_issue(entry['id'],entry,error)
             b = ttk.Button(gallery['grid'],text=text,image=photo,compound='top',
                            command=lambda sid=entry['id']:self._select_sample(sid))
             b.grid(row=i//2,column=i%2,sticky='nsew',padx=3,pady=3)
             b.bind('<Double-1>',lambda event,key=truth:self.view_photo(key))
+            self._decorate_photo(b,entry['id'],entry,text)
             for event in ('<MouseWheel>','<Button-4>','<Button-5>'):
                 b.bind(event,gallery['scroller'].scroll_callback)
         for i in range(2):
@@ -2067,6 +2290,7 @@ class Application:
     def _submit(self, work, done, text):
         if self.task is not None:
             raise RuntimeError('Hay una operación en curso; espera a que termine.')
+        self.stop_live_test()
         self.message.set(text)
         self.task = (self.executor.submit(work),done)
         self._set_admin_editable(False)
@@ -2094,6 +2318,9 @@ class Application:
             return
         self.dirty = True
         self.dirty_label.configure(text='Cambios sin guardar')
+        self.stop_live_test('Ajustes cambiados: vuelve a iniciar la prueba en vivo.')
+        if self.report_idle_id is None:
+            self.report_idle_id = self.root.after_idle(self._run_report_idle)
         if hasattr(self,'zone_scales'):
             self._update_zone_activity()
 
@@ -2140,6 +2367,7 @@ class Application:
         return c
 
     def _load_editor(self,m):
+        self.stop_live_test()
         self.loading = True
         try:
             same_model = self.model is not None and self.model['id'] == m['id']
@@ -2163,6 +2391,7 @@ class Application:
             self.dirty_label.configure(text='Configuración guardada')
             if not same_model:
                 self.gallery_slot = next((i for i,e in enumerate(c['references']) if not e),0)
+            self._load_photo_report()
             self._refresh_gallery()
             self._refresh_samples()
             self._refresh_validation()
@@ -2200,6 +2429,7 @@ class Application:
         if self.admin_mode:
             if not self._resolve_dirty():
                 return
+            self.stop_live_test()
             self.admin_mode = False
             self.admin.pack_forget()
             self.ops.pack(fill='both',expand=True)
@@ -2469,6 +2699,7 @@ class Application:
     def reconnect_camera(self):
         if self.closed:
             return
+        self.stop_live_test()
         if self.running or getattr(self,'pending_start',False):
             self.pause()
         if self.admin_mode and self.model is not None:
@@ -2586,11 +2817,10 @@ class Application:
                     count += 1
                     if entry.get('piece_id'):
                         text += '\n'+entry['piece_id'][:16]
-                except Exception:
-                    text += '\nImagen inválida'
-            else:
-                text += '\nSin imagen'
+                except (ValueError,OSError,cv2.error) as error:
+                    self._cache_photo_issue(f'reference:{i}',entry,error)
             b.configure(image=photo,text=text,compound='top')
+            self._decorate_photo(b,f'reference:{i}',entry,text)
         self.gallery_info.configure(text=f'{count} / 10 referencias legibles · seleccionada: {self.gallery_slot+1} · alineación pendiente de comprobar')
         self.roi_label.configure(text=f"Región general: {self.draft['roi'] or 'sin configurar'}")
         self._fill_photo_details('reference',self.draft['references'][self.gallery_slot],self.gallery_slot)
@@ -2600,11 +2830,13 @@ class Application:
         self.gallery_slot = index
         self._refresh_gallery()
 
-    def _show_image(self,image,title):
+    def _show_image(self,image,title,details=''):
         dialog = tk.Toplevel(self.root)
         dialog.title(title)
         dialog.geometry('960x670')
-        canvas = ImageCanvas(dialog)
+        if details:
+            ttk.Label(dialog,text=details,wraplength=900,padding=10).pack(fill='x')
+        canvas = ImageCanvas(dialog,empty_text='Imagen no disponible')
         canvas.pack(fill='both',expand=True)
         canvas.display(image)
         ttk.Button(dialog,text='Cerrar',command=dialog.destroy).pack(pady=8)
@@ -2612,7 +2844,14 @@ class Application:
 
     def view_reference(self,index):
         self._flush_photo_details('reference')
-        self._show_image(self._reference_image(index),f'Referencia OK {index+1}')
+        info = self._photo_diagnostic(f'reference:{index}',self.draft['references'][index])
+        if info.get('row_id') and not info.get('local_read_error'):
+            return self._show_event(self._event_by_id(info['row_id']))
+        try:
+            image = self._reference_image(index)
+        except (ValueError,OSError,cv2.error):
+            image = None
+        self._show_image(image,f'Referencia OK {index+1}',info['reason'])
 
     def _replace_reference(self,image,*,base_frame=None):
         c = self._sync()
@@ -2767,7 +3006,10 @@ class Application:
         if self.draft:
             for e in reference_samples(self.draft)+ng_samples(self.draft):
                 piece = e['piece_id']
-                self.samples_table.insert('','end',iid=e['id'],values=(piece,e['truth'],e.get('defect_type',''),e['note']))
+                info = self._photo_diagnostic(e['id'],e)
+                state = 'unevaluated' if info['state']=='stale' else info['state']
+                self.samples_table.insert('','end',iid=e['id'],tags=(state,),
+                    values=(piece,e['truth'],info['label'],e.get('defect_type',''),e['note']))
         if selection and self.samples_table.exists(selection[0]):
             self.samples_table.selection_set(selection[0])
         for truth in self.sample_galleries:
@@ -2840,6 +3082,56 @@ class Application:
             f"Sin evaluación: {s['reference_unevaluated']+s['ng_photo_unevaluated']} · Estado: {self.store.status(self.model)}\n"
             'Las OK son las referencias; este resultado no es una validación independiente.'))
 
+    def stop_live_test(self,reason='Prueba en vivo detenida · no modifica producción'):
+        self.live_running = False
+        self.live_generation += 1
+        self.live_cycle = None
+        self.live_output = None
+        if hasattr(self,'live_button'):
+            self.live_button.configure(text='Probar inspección en vivo')
+            self.live_status.configure(text=reason,foreground='#9cabc1')
+
+    @admin_action
+    def toggle_live_test(self):
+        if self.live_running:
+            self.stop_live_test()
+            return
+        c = copy.deepcopy(self._sync())
+        self._fresh_frame(c)
+        m = copy.deepcopy(self.model)
+        m['config'] = c
+        def done(engine):
+            self.live_cycle = InspectionCycle(engine,require_clear=False)
+            self.live_running = True
+            self.live_generation += 1
+            self.live_last_stamp = 0.
+            self.live_button.configure(text='Detener prueba en vivo')
+            self.live_status.configure(text='PRUEBA EN VIVO · ajustes actuales · sin conteo de producción',foreground='#ffcb78')
+            self.message.set('Prueba de inspección activa en Administración. No requiere habilitar el modelo ni aprobar las NG.')
+        self._submit(lambda:VisionEngine(self.store,m),done,'Preparando prueba en vivo con las 10 OK; las NG no bloquean esta prueba…')
+
+    def _consume_live_test(self):
+        if self.live_future is None:
+            return
+        future,generation = self.live_future
+        if not future.done():
+            return
+        self.live_future = None
+        try:
+            out = future.result()
+        except Exception as error:
+            if self.live_running and generation == self.live_generation:
+                self.stop_live_test('Prueba detenida: '+str(error))
+            return
+        if not self.live_running or generation != self.live_generation:
+            return
+        self.live_output = out
+        result = out['result']
+        label = 'SIN EVALUACIÓN' if not result else ('OK' if result['ok'] else 'NG')
+        zones = '' if not result else ' · '.join(f"{z['name']}: {'OK' if z['ok'] else 'DIFERENCIA'}" for z in result['zonas'])
+        color = '#ffcb78' if not result else ('#35e0b5' if result['ok'] else '#ff7b8d')
+        self.live_status.configure(text=f"PRUEBA · {label} · {out['state']} · {zones}",foreground=color)
+
     @admin_action
     def try_settings(self):
         c = copy.deepcopy(self._sync())
@@ -2866,22 +3158,17 @@ class Application:
         m = self.store.read(self.model['id'])
         if len(ng_samples(m['config'])) != 10:
             raise ValueError('Guarda 10 fotos OK y 10 fotos NG. Las mismas OK se usan como referencia.')
-        def work():
-            engine = VisionEngine(self.store,m)
-            rows = []
-            for entry in reference_samples(m['config'])+ng_samples(m['config']):
-                image = self.store.image(m['id'],entry)
-                result,annotated,note = engine.evaluate_sample(image,entry)
-                details = ' · '.join(v for v in (entry.get('defect_type',''),entry.get('note','')) if v)
-                kind = 'reference_check' if entry['id'].startswith('reference:') else 'validation'
-                rows.append(self.store.record(m,result,kind=kind,operator='Administrador',
-                    truth=entry['truth'],piece_id=entry['piece_id'],sample_id=entry['id'],image=image,
-                    annotated=annotated,note=' | '.join(v for v in (note,details) if v)))
-            return rows
         def done(rows):
+            self._load_photo_report()
+            self._refresh_gallery()
+            self._refresh_samples()
             self._refresh_validation()
-            self.message.set(f'{len(rows)} pruebas terminadas para la versión {m["version"]}. Revisa aciertos, errores y muestras sin evaluación.')
-        self._submit(work,done,'Comprobando las 10 OK de referencia y las 10 NG…')
+            if any(info['state'] in ('fail','unevaluated') for info in self.photo_report.values()):
+                self.last_problem_sid = None
+                self.show_problem_photo()
+            else:
+                self.message.set(f'{len(rows)} fotos comprobadas: sus resultados están marcados en verde en las galerías.')
+        self._submit(lambda:check_saved_photos(self.store,m),done,'Comprobando las 10 OK de referencia y las 10 NG…')
 
     @admin_action
     def approve_model(self):
@@ -2973,6 +3260,7 @@ class Application:
         self.choose_button.configure(state='normal' if enabled else 'disabled')
 
     def pause(self):
+        self.stop_live_test()
         was_running = self.running or getattr(self,'pending_start',False)
         self.running = self.pending_start = False
         self.start_button.configure(text='Iniciar inspección')
@@ -3014,7 +3302,12 @@ class Application:
             self.engine = engine
             self.cycle = InspectionCycle(engine,require_clear=True)
             self.message.set('Modelo comprobado. Esperando cámara; retira la pieza para armar el primer ciclo.')
-        self._submit(lambda:VisionEngine(self.store,m),done,'Cargando modelo y comprobando 10 referencias OK…')
+        self._submit(lambda:self._prepare_production_engine(m),done,'Cargando modelo y comprobando 10 referencias OK…')
+
+    def _prepare_production_engine(self,model):
+        # La prueba administrativa tolera NG inválidas; producción conserva la integridad completa.
+        self.store.integrity(model,True)
+        return VisionEngine(self.store,model)
 
     def _refresh_counts(self):
         if not hasattr(self,'counts'):
@@ -3062,6 +3355,7 @@ class Application:
         if self.closed:
             return
         try:
+            self._consume_live_test()
             if self.task is not None:
                 future,done = self.task
                 if future.done():
@@ -3073,6 +3367,7 @@ class Application:
                     except Exception as e:
                         traceback.print_exc()
                         self.pause()
+                        self.stop_live_test('No se pudo iniciar la operación. Revisa las fotos y la configuración.')
                         self.message.set('Operación no completada: '+str(e))
                         messagebox.showerror('Operación no completada',str(e),parent=self.root)
             frame,stamp,info = self.camera.snapshot()
@@ -3090,6 +3385,8 @@ class Application:
                     self.pause()
                     self.message.set('No se pudo iniciar: '+info['status'])
             if not fresh:
+                if self.live_running:
+                    self.stop_live_test('Prueba detenida: cámara sin imagen reciente.')
                 if self.running:
                     self.pause()
                     if self.cycle:
@@ -3098,7 +3395,13 @@ class Application:
                 self.video.display(None)
                 self.admin_video.display(None)
             elif self.admin_mode:
-                if time.monotonic() >= getattr(self,'preview_hold_until',0):
+                if self.live_running:
+                    if self.live_future is None and self.task is None and stamp != self.live_last_stamp:
+                        self.live_last_stamp = stamp
+                        cycle = self.live_cycle
+                        self.live_future = (self.executor.submit(cycle.process,frame,stamp),self.live_generation)
+                    self.admin_video.display(self.live_output['annotated'] if self.live_output else frame)
+                elif time.monotonic() >= getattr(self,'preview_hold_until',0):
                     preview = frame.copy()
                     try:
                         preview = cv2.convertScaleAbs(preview,alpha=float(self.fields['contrast'].get())/100.,beta=float(self.fields['brightness'].get()))
@@ -3157,6 +3460,9 @@ class Application:
         if row['truth']:
             text += f"\nPieza: {row['piece_id']} · condición real: {row['truth']}"
         result = json.loads(row['result'])
+        if row['kind'] in ('reference_check','validation') and row['truth'] in ('OK','NG'):
+            info = describe_photo_result(dict(truth=row['truth']),row)
+            text += '\n'+info['label']+' · '+info['reason']
         if result:
             text += f"\nResultado: {row['outcome']} · coincidencia: {result['match']:.3f}"
             for z in result['zonas']:
@@ -3164,7 +3470,7 @@ class Application:
         else:
             text += '\nSIN EVALUACIÓN · '+row['note']
         ttk.Label(dialog,text=text,padding=10,wraplength=960,justify='left').pack(fill='x')
-        canvas = ImageCanvas(dialog)
+        canvas = ImageCanvas(dialog,empty_text='Imagen no disponible')
         canvas.pack(fill='both',expand=True)
         def display(key):
             if not row.get(key):
@@ -3240,8 +3546,11 @@ class Application:
         if self.admin_mode and not self._resolve_dirty():
             return
         self.closed = True
+        self.stop_live_test()
         self.running = self.pending_start = False
         self.root.after_cancel(self.poll_id)
+        if self.report_idle_id is not None:
+            self.root.after_cancel(self.report_idle_id)
         self.camera.close()
         self.executor.shutdown(wait=False,cancel_futures=True)
         self.root.destroy()
@@ -3258,7 +3567,7 @@ def main():
     parser = argparse.ArgumentParser(description='Poka-Yoke 5 · Administración e inspección local')
     parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parent/'datos',
                         help='Ubicación de modelos, contraseña y registros; por defecto datos junto al programa')
-    parser.add_argument('--version',action='version',version='Poka-Yoke 5.2.0')
+    parser.add_argument('--version',action='version',version='Poka-Yoke 5.3.0')
     args = parser.parse_args()
     try:
         import tkinter as tk

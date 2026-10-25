@@ -336,6 +336,83 @@ class GuiTests(unittest.TestCase):
         self.assertIn(m['part'],self.app.op_models)
         self.assertIsNotNone(self.app.model['validation'])
 
+    def test_failed_ng_is_red_and_opens_its_exact_result(self):
+        self.admin();m=self.model_in_editor()
+        m=add_samples(self.app.store,m,truths=('NG',))
+        c=copy.deepcopy(m['config'])
+        image=images()[1].copy();image[0,0]=[3,4,5]
+        c['samples'][0].update(self.app.store.put_image(m['id'],image))
+        m=self.app.store.save(m['id'],c)
+        sid=c['samples'][0]['id']
+        self.app._load_editor(m)
+        self.app.run_validation();self.wait_idle()
+        self.assertEqual(self.app.photo_report[sid]['label'],'NG pasa como OK')
+        self.assertEqual(self.app.selected_sample_ids['NG'],sid)
+        self.assertIn('NG pasa como OK',self.app.photo_fields['NG']['diagnosis'].cget('text'))
+        self.assertIn('fail',self.app.samples_table.item(sid,'tags'))
+        widget=next(w for w in self.app.sample_galleries['NG']['grid'].winfo_children() if w.photo_sid==sid)
+        self.assertEqual(widget.cget('style'),'PhotoFail.TButton')
+        self.app.view_photo('NG');self.pump(.1)
+        windows=[w for w in self.root.winfo_children() if isinstance(w,tk.Toplevel)]
+        self.assertEqual(len(windows),1)
+        windows[0].destroy()
+        self.app._load_editor(self.app.store.read(m['id']))
+        self.assertEqual(self.app.photo_report[sid]['state'],'fail')
+        self.app.zone_scales['1'].set(175)
+        self.pump(.15)
+        widget=next(w for w in self.app.sample_galleries['NG']['grid'].winfo_children() if w.photo_sid==sid)
+        self.assertEqual(widget.cget('style'),'PhotoWarning.TButton')
+        self.assertIn('anterior',widget.cget('text'))
+
+    def test_unlocatable_ng_is_amber_and_can_be_selected(self):
+        self.admin();m=self.model_in_editor()
+        m=add_samples(self.app.store,m,truths=('NG',))
+        c=copy.deepcopy(m['config'])
+        c['samples'][0].update(self.app.store.put_image(m['id'],np.full((200,240,3),27,np.uint8)))
+        m=self.app.store.save(m['id'],c)
+        sid=c['samples'][0]['id']
+        self.app._load_editor(m)
+        self.app.run_validation();self.wait_idle()
+        self.assertEqual(self.app.photo_report[sid]['label'],'SIN EVALUAR')
+        widget=next(w for w in self.app.sample_galleries['NG']['grid'].winfo_children() if w.photo_sid==sid)
+        self.assertEqual(widget.cget('style'),'PhotoWarning.TButton')
+        self.assertIn('Sin coincidencia',self.app.photo_report[sid]['reason'])
+
+    def test_live_test_works_with_bad_ng_without_approving_production(self):
+        self.admin();m=self.model_in_editor()
+        m=add_samples(self.app.store,m,truths=('NG',))
+        entry=m['config']['samples'][0]
+        (self.app.store.model_dir(m['id'])/entry['path']).write_bytes(b'foto danada')
+        self.app._load_editor(m)
+        with self.assertRaises((ValueError,OSError)):
+            self.app._prepare_production_engine(m)
+        self.camera.frame=images()[1]
+        self.app.toggle_live_test();self.wait_idle()
+        self.pump(1.8)
+        self.assertTrue(self.app.live_running)
+        self.assertIsNotNone(self.app.live_output)
+        self.assertTrue(self.app.live_output['result']['ok'])
+        self.assertIn('PRUEBA',self.app.live_status.cget('text'))
+        self.assertNotIn(m['part'],self.app.op_models)
+        self.assertEqual(self.app.store.events(model_id=m['id'],kind='production'),[])
+        self.assertEqual(self.app.store.counts(m['id'],''),(0,0))
+        self.assertIsNone(self.app.store.read(m['id'])['validation'])
+        self.app.zone_scales['1'].set(150)
+        self.pump(.15)
+        self.assertFalse(self.app.live_running)
+        self.assertIn('Ajustes cambiados',self.app.live_status.cget('text'))
+
+    def test_live_test_stops_on_camera_loss_and_cannot_count_production(self):
+        self.admin();m=self.model_in_editor()
+        self.camera.frame=images()[1]
+        self.app.toggle_live_test();self.wait_idle();self.pump(.3)
+        self.assertTrue(self.app.live_running)
+        self.camera.ready=False;self.pump(.2)
+        self.assertFalse(self.app.live_running)
+        self.assertIn('sin imagen',self.app.live_status.cget('text'))
+        self.assertEqual(self.app.store.events(model_id=m['id']),[])
+        self.assertFalse(self.app.running)
+
     def test_exactly_ten_ok_references_and_ten_ng_enable_inspection(self):
         self.admin();m=self.model_in_editor()
         for i in range(10):

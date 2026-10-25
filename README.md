@@ -1,6 +1,6 @@
 # Poka-Yoke 5
 
-Versión **5.2.0**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.3.0**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
 
 ## Ejecutar
 
@@ -57,6 +57,33 @@ Para habilitar una versión se requieren diez OK comprobadas y diez NG comprobad
 
 En el historial se distinguen las comprobaciones de referencia, las pruebas NG y la producción. Los contadores de operación incluyen únicamente inspecciones de producción del número de parte y lote activos.
 
+## Fotos con errores visibles
+
+Guarda los ajustes y pulsa **Comprobar 10 OK + 10 NG**. Cada miniatura y fila de la comprobación muestra su resultado:
+
+- **Verde:** coincide con la etiqueta. Una NG correctamente detectada también se marca en verde.
+- **Rojo:** error, por ejemplo **NG pasa como OK**, **OK pasa como NG**, foto ilegible o una imagen que **no cuenta como NG** por ser idéntica a una OK o repetir otra NG.
+- **Ámbar:** fotografía sin evaluación, por ejemplo porque no se localiza la pieza. Se informa el motivo; no se cuenta como defecto detectado.
+- **Sin comprobar:** no hay un resultado de esa configuración.
+
+Al terminar se abre la primera foto con problemas. **Siguiente foto con problema**, en Comprobación, permite recorrer las demás. Selecciona una miniatura y pulsa **Ampliar** para ver su imagen, etiqueta esperada, resultado, coincidencia, mediciones por zona y explicación del error. Las referencias OK que no se alinean quedan identificadas por su posición.
+
+La comprobación continúa con las demás fotos si una imagen está dañada o tiene dimensiones incorrectas. Cuando un error en las referencias impide construir el patrón, las fotos afectadas se señalan y las demás quedan sin evaluar con la explicación correspondiente.
+
+Los resultados se conservan en el historial local y se recuperan al abrir el mismo modelo y versión. Después de cambiar un ajuste se marcan como anteriores; guarda y repite la comprobación para obtener resultados actuales. Las fotos nuevas no heredan el resultado de las que reemplazaron.
+
+![Ejemplo de una NG aceptada como OK y marcada en rojo](docs/ejemplo_fotos_errores.png)
+
+Ejemplo generado con imágenes sintéticas para comprobar la interfaz.
+
+## Probar inspección en vivo antes de habilitar producción
+
+En Administración, junto a la cámara, pulsa **Probar inspección en vivo**. Necesitas diez OK utilizables, las zonas configuradas y una imagen compatible de cámara. **Las pruebas NG fallidas, incompletas o sus archivos dañados no bloquean esta prueba administrativa.** Si una referencia OK no permite construir el patrón, debe corregirse antes.
+
+La pantalla muestra **PRUEBA**, el resultado y las zonas. El ciclo evalúa una vez y espera retiro de la pieza; puedes detener y volver a iniciar para repetir una prueba. No habilita el modelo, no incrementa contadores de producción ni guarda automáticamente inspecciones de producción.
+
+Si cambias un ajuste, la prueba se detiene para que la reinicies con los valores actuales. También se detiene si se pierde la cámara. El botón permite detenerla manualmente. La inspección de producción conserva sus requisitos de comprobación, integridad de datos y habilitación.
+
 ## Datos y respaldos
 
 Por defecto se guardan modelos, versiones, contraseña y registros en `datos`, junto al archivo Python. La ubicación no depende de la carpeta desde la que se ejecuta. Puedes cambiarla:
@@ -69,7 +96,7 @@ La carpeta de datos está excluida de Git. Para respaldar todo, cierra el progra
 
 ## Verificación y límites
 
-Esta versión pasó **66 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. No se verificó una cámara física ni su controlador de Windows.
+Esta versión pasó **77 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores, diagnósticos por foto, compatibilidad del historial anterior, pruebas en vivo sin habilitación y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. No se verificó una cámara física ni su controlador de Windows.
 
 Comprueba en tu equipo enfoque, iluminación, resolución, velocidad y resultados con piezas reales. La presencia y el retiro se estiman visualmente; no hay un sensor físico de presencia. El motor indica diferencias por zona, sin diagnosticar automáticamente el tipo de defecto.
 
