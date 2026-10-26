@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Poka-Yoke 5.3.1 — archivo único: Administración e Inspección.
+"""Poka-Yoke 5.4.0 — interfaz industrial con CustomTkinter, archivo único.
 
 Ejecutar: python poka_yoke_mejorado5.py
-Dependencias: python -m pip install numpy opencv-python Pillow
+Dependencias: python -m pip install numpy opencv-python Pillow customtkinter
 Python recomendado: 3.12 (con Tkinter).
 Los modelos y registros se guardan en datos, junto a este archivo.
 Opcional: --data-dir "D:/PokaYokeDatos"
@@ -16,11 +16,12 @@ try:
     import tkinter
     import cv2
     import numpy
+    import customtkinter as ctk
     from PIL import Image, ImageTk
 except ImportError as error:
     if __name__ == '__main__':
         import sys
-        print(f'Falta una dependencia: {error}\nInstala con: python -m pip install numpy opencv-python Pillow\nPython debe incluir Tkinter.', file=sys.stderr)
+        print(f'Falta una dependencia: {error}\nInstala con: python -m pip install numpy opencv-python Pillow customtkinter\nPython debe incluir Tkinter.', file=sys.stderr)
         raise SystemExit(1)
     raise
 
@@ -1448,6 +1449,8 @@ from tkinter import ttk, messagebox
 import cv2
 from PIL import Image, ImageTk
 
+UI_FONT = 'Segoe UI' if os.name == 'nt' else 'DejaVu Sans'
+
 
 class ImageCanvas(tk.Canvas):
     def __init__(self, parent, empty_text='Sin imagen de cámara', **kw):
@@ -1466,7 +1469,7 @@ class ImageCanvas(tk.Canvas):
         self.delete('all')
         if self.source is None:
             self.create_text(max(100,self.winfo_width()/2), max(80,self.winfo_height()/2),
-                             text=self.empty_text, fill='#91a1b9', font=('Segoe UI',14))
+                             text=self.empty_text, fill='#91a1b9', font=(UI_FONT,14))
             return
         h,w = self.source.shape[:2]
         cw,ch = max(10,self.winfo_width()),max(10,self.winfo_height())
@@ -1553,7 +1556,7 @@ class RegionDialog(tk.Toplevel):
 class ScrollFrame(ttk.Frame):
     def __init__(self,parent):
         super().__init__(parent)
-        canvas = tk.Canvas(self,bg='#142033',highlightthickness=0)
+        canvas = tk.Canvas(self,bg='#151e2b',highlightthickness=0)
         bar = ttk.Scrollbar(self,orient='vertical',command=canvas.yview)
         canvas.configure(yscrollcommand=bar.set)
         bar.pack(side='right',fill='y')
@@ -1608,9 +1611,134 @@ def admin_action(fn):
     return wrapped
 
 
+class ActionButton(ctk.CTkButton):
+    """Botón compacto con el mismo control de habilitación que los widgets de Tk."""
+    def __init__(self,parent,text,command,tone='neutral',**kw):
+        colors = {'neutral':('#243449','#334c69'), 'primary':('#087e68','#096653'),
+                  'danger':('#803543','#a24251'), 'warning':('#88591c','#a36c25')}
+        color,hover = colors[tone]
+        from tkinter import font as tkfont
+        font = tkfont.Font(root=parent,family=UI_FONT,size=10)
+        width = max(64,font.measure(text)+24)
+        self._measure_font = font
+        super().__init__(parent,text=text,command=command,width=width,height=30,
+                         corner_radius=5,border_width=1,border_color='#40516a',
+                         fg_color=color,hover_color=hover,text_color='#edf3fa',
+                         text_color_disabled='#8291a5',font=(UI_FONT,13),**kw)
+
+    def configure(self,**kw):
+        if 'text' in kw and 'width' not in kw:
+            kw['width'] = max(64,self._measure_font.measure(kw['text'])+24)
+        super().configure(**kw)
+        if isinstance(self.master,ActionBar):
+            self.master._last_width = None
+            self.master._reflow()
+
+    def state(self,spec=None):
+        if spec is not None:
+            self.configure(state='disabled' if 'disabled' in spec else 'normal')
+        return ('disabled',) if self.cget('state') == 'disabled' else ()
+
+    def instate(self,spec):
+        disabled = self.cget('state') == 'disabled'
+        return all(disabled if s == 'disabled' else not disabled for s in spec)
+
+
+class ZoneSlider(ctk.CTkSlider):
+    """Incluye redondeo visible y permite cargar valores con set(), igual que antes."""
+    def __init__(self,parent,command):
+        self.on_change = command
+        super().__init__(parent,from_=1,to=300,number_of_steps=299,height=18,
+                         progress_color='#19b99a',button_color='#32d4b0',
+                         button_hover_color='#78ead0',fg_color='#304057',command=command)
+
+    def set(self,value):
+        super().set(value)
+        self.on_change(self.get())
+
+    def state(self,spec=None):
+        if spec is not None:
+            self.configure(state='disabled' if 'disabled' in spec else 'normal')
+        return ('disabled',) if self.cget('state') == 'disabled' else ()
+
+    def instate(self,spec):
+        disabled = self.cget('state') == 'disabled'
+        return all(disabled if s == 'disabled' else not disabled for s in spec)
+
+
+class ActionBar(ctk.CTkFrame):
+    """Distribuye acciones en las filas necesarias, sin ocultar botones a la derecha."""
+    def __init__(self,parent,**kw):
+        super().__init__(parent,fg_color='transparent',corner_radius=0,height=34,**kw)
+        self.actions = []
+        self._last_width = None
+        self.bind('<Configure>',self._reflow,add='+')
+
+    def add(self,widget):
+        self.actions.append(widget)
+        widget.place(x=0,y=2)
+        self._last_width = None
+
+    def _reflow(self,event=None):
+        width = self.winfo_width()
+        if width < 2 or width == self._last_width:
+            return
+        self._last_width = width
+        row = used = 0
+        for widget in self.actions:
+            needed = widget.winfo_reqwidth()+6
+            if used and used+needed > width:
+                row,used = row+1,0
+            widget.place_configure(x=used,y=row*34+2)
+            used += needed
+        self.configure(height=(row+1)*34)
+
+
+class TabPanel(ctk.CTkFrame):
+    """Pestañas oscuras; mantiene los identificadores de página usados por la aplicación."""
+    def __init__(self,parent,**kw):
+        super().__init__(parent,fg_color='#151e2b',corner_radius=6,**kw)
+        self.pages = []
+        self.current = None
+        self.grid_columnconfigure(0,weight=1)
+        self.grid_rowconfigure(1,weight=1)
+        self.selector = ctk.CTkSegmentedButton(self,values=[' '],height=30,corner_radius=5,
+            font=(UI_FONT,13),fg_color='#0c131e',selected_color='#285776',
+            selected_hover_color='#316c91',unselected_color='#1d2a3c',
+            unselected_hover_color='#2c405a',text_color='#edf3fa',command=self.select)
+        self.selector.grid(row=0,column=0,sticky='ew',padx=4,pady=(4,6))
+
+    def add(self,page,*,text):
+        self.pages.append((page,text))
+        self.selector.configure(values=[title for _,title in self.pages])
+        if self.current is None:
+            self.select(page)
+
+    def select(self,page=None):
+        if page is None:
+            return str(self.current) if self.current else ''
+        target = next((w for i,(w,title) in enumerate(self.pages)
+                       if page == w or str(page) == str(w) or page == title or page == i),None)
+        if target is None:
+            raise ValueError('Pestaña desconocida.')
+        if self.current is not None and self.current != target:
+            self.current.grid_remove()
+        self.current = target
+        target.grid(row=1,column=0,sticky='nsew',padx=4,pady=(0,4))
+        self.selector.set(next(title for w,title in self.pages if w == target))
+        self.event_generate('<<NotebookTabChanged>>')
+        return str(target)
+
+    def tabs(self):
+        return tuple(str(w) for w,_ in self.pages)
+
+
 def button(parent, text, command, **kw):
-    b = ttk.Button(parent, text=text, command=command, **kw)
-    b.pack(side='left', padx=(0,6), pady=3)
+    b = ActionButton(parent,text,command,**kw)
+    if isinstance(parent,ActionBar):
+        parent.add(b)
+    else:
+        b.pack(side='left',padx=(0,6),pady=2)
     return b
 
 
@@ -1657,370 +1785,447 @@ class Application:
         self.live_cycle = None
         self.live_output = None
         self.live_last_stamp = 0.
-        self.root.title('Poka-Yoke 5 · Inspección y administración')
-        width = min(1320,max(800,self.root.winfo_screenwidth()-40))
-        height = min(840,max(600,self.root.winfo_screenheight()-40))
-        self.root.geometry(f'{width}x{height}')
-        self.root.minsize(min(1000,width),min(680,height))
-        self.root.configure(bg='#0c1422')
+        ctk.set_appearance_mode('dark')
+        self.root.title('Poka-Yoke 5.4 · Inspección industrial')
+        width = min(1440,max(800,self.root.winfo_screenwidth()-40))
+        height = min(900,max(600,self.root.winfo_screenheight()-60))
+        # CTk recibe unidades lógicas; winfo_screen* devuelve píxeles físicos.
+        scale = ctk.ScalingTracker.get_window_scaling(self.root) if isinstance(self.root,ctk.CTk) else 1.
+        self.root.geometry(f'{int(width/scale)}x{int(height/scale)}')
+        self.root.minsize(int(min(1000,width)/scale),int(min(680,height)/scale))
+        if isinstance(self.root,ctk.CTk):
+            self.root.configure(fg_color='#0c131e')
+        else:
+            self.root.configure(bg='#0c131e')
         self._style()
         self.root.report_callback_exception = self._callback_error
         self.root.protocol('WM_DELETE_WINDOW',self.close)
-        header = ttk.Frame(root,padding=(18,12))
-        header.pack(fill='x')
-        ttk.Label(header,text='POKA-YOKE',style='Title.TLabel').pack(side='left')
-        self.mode_label = ttk.Label(header,text='INSPECCIÓN',style='Accent.TLabel')
-        self.mode_label.pack(side='left',padx=18)
-        self.access_button = ttk.Button(header,text='Administración',command=self.toggle_admin)
-        self.access_button.pack(side='right')
-        self.camera_button = ttk.Button(header,text='Abrir / reconectar cámara',command=self.reconnect_camera)
-        self.camera_button.pack(side='right',padx=8)
-        self.body = ttk.Frame(root,padding=(12,0))
-        self.body.pack(fill='both',expand=True)
-        self.ops = ttk.Frame(self.body)
-        self.admin = ttk.Frame(self.body)
+        header = ctk.CTkFrame(root,fg_color='#0c131e',corner_radius=0)
+        header.pack(fill='x',padx=14,pady=(8,6))
+        header.grid_columnconfigure(1,weight=1)
+        ctk.CTkLabel(header,text='POKA-YOKE',font=(UI_FONT,23,'bold'),
+                     text_color='#edf3fa').grid(row=0,column=0,sticky='w')
+        self.mode_label = ctk.CTkLabel(header,text='INSPECCIÓN',font=(UI_FONT,12,'bold'),
+                                     text_color='#35d7b3')
+        self.mode_label.grid(row=0,column=1,sticky='w',padx=16)
+        self.camera_button = ActionButton(header,'Reconectar cámara',self.reconnect_camera)
+        self.camera_button.grid(row=0,column=2,padx=6)
+        self.access_button = ActionButton(header,'Administración',self.toggle_admin)
+        self.access_button.grid(row=0,column=3)
+        self.body = ctk.CTkFrame(root,fg_color='#0c131e',corner_radius=0)
+        self.body.pack(fill='both',expand=True,padx=10)
+        self.ops = ctk.CTkFrame(self.body,fg_color='#151e2b',corner_radius=6)
+        self.admin = ctk.CTkFrame(self.body,fg_color='#151e2b',corner_radius=6)
         self._build_operations()
         self._build_admin()
         self.ops.pack(fill='both',expand=True)
-        footer = ttk.Frame(root,padding=(16,8))
-        footer.pack(side='bottom',fill='x',before=self.body)
+        self.footer = ttk.Frame(root,padding=(12,5))
+        self.footer.pack(side='bottom',fill='x',before=self.body)
         self.message = tk.StringVar(value='Selecciona un modelo validado o entra a Administración para prepararlo.')
-        ttk.Label(footer,textvariable=self.message,wraplength=1200).pack(anchor='w')
+        self.message_label = ttk.Label(self.footer,textvariable=self.message,wraplength=1100)
+        self.message_label.pack(anchor='w',fill='x')
         self.camera_status = tk.StringVar(value='Cámara sin abrir')
-        ttk.Label(footer,textvariable=self.camera_status,style='Muted.TLabel',wraplength=1200).pack(anchor='w')
+        self.camera_status_label = ttk.Label(self.footer,textvariable=self.camera_status,style='Muted.TLabel',wraplength=1100)
+        self.camera_status_label.pack(anchor='w',fill='x')
+        self.root.bind('<Configure>',self._resize_shell,add='+')
         self._refresh_catalog()
         self.poll_id = self.root.after(80,self._poll)
         # La vista previa es independiente de preparar o validar un modelo.
         self._configure_preview(defaults()['camera'])
 
+    def _resize_shell(self,event):
+        if event.widget == self.root:
+            for label in (self.message_label,self.camera_status_label):
+                label.configure(wraplength=max(400,event.width-32))
+
     def _style(self):
         s = ttk.Style(self.root)
         s.theme_use('clam')
         families = {str(f).casefold() for f in self.root.tk.call('font','families')}
-        family = 'Segoe UI' if 'segoe ui' in families else 'Helvetica'
-        s.configure('.',background='#142033',foreground='#e7eef9',fieldbackground='#1e3049',font=(family,10))
-        s.configure('TFrame',background='#142033')
-        s.configure('TLabel',background='#142033',foreground='#e7eef9')
-        s.configure('Title.TLabel',font=(family,21,'bold'))
-        s.configure('Accent.TLabel',foreground='#35e0b5',font=(family,11,'bold'))
-        s.configure('Muted.TLabel',foreground='#9cabc1')
-        s.configure('Result.TLabel',font=(family,30,'bold'),padding=12)
-        s.configure('TButton',padding=(10,7),background='#243954')
-        s.map('TButton',background=[('active','#365678'),('disabled','#1a293e')])
-        s.configure('Treeview',background='#101b2c',fieldbackground='#101b2c',rowheight=30)
-        s.configure('Treeview.Heading',background='#243954',font=(family,10,'bold'))
-        s.map('Treeview',background=[('selected','#236f86')])
-        s.configure('TNotebook.Tab',padding=(15,8))
-        s.configure('TEntry',padding=5)
-        s.configure('TCombobox',padding=5)
-        s.map('TCombobox',fieldbackground=[('readonly','#1e3049')],foreground=[('readonly','#e7eef9')])
-        for name,color in [('Pass','#1c5545'),('Fail','#7b293b'),('Warning','#6c4d1c'),('Pending','#243954')]:
-            s.configure('Photo'+name+'.TButton',background=color,foreground='#ffffff',borderwidth=3)
+        family = UI_FONT if UI_FONT.casefold() in families else 'Helvetica'
+        s.configure('.',background='#151e2b',foreground='#e4ecf7',fieldbackground='#1c293b',font=(family,10))
+        s.configure('TFrame',background='#151e2b')
+        s.configure('TLabel',background='#151e2b',foreground='#e4ecf7')
+        s.configure('Title.TLabel',font=(family,20,'bold'))
+        s.configure('Accent.TLabel',foreground='#35d7b3',font=(family,10,'bold'))
+        s.configure('Muted.TLabel',foreground='#a0afc3')
+        s.configure('Result.TLabel',font=(family,28,'bold'),padding=8)
+        s.configure('TButton',padding=(8,4),background='#243449',borderwidth=1)
+        s.map('TButton',background=[('active','#334c69'),('disabled','#1a2534')])
+        s.configure('Treeview',background='#111a27',fieldbackground='#111a27',rowheight=27,borderwidth=0)
+        s.configure('Treeview.Heading',background='#243449',font=(family,10,'bold'),padding=5)
+        s.map('Treeview',background=[('selected','#285776')])
+        s.configure('TEntry',padding=(6,4),borderwidth=1,lightcolor='#40516a',darkcolor='#40516a')
+        s.configure('Compact.TEntry',padding=(5,2))
+        s.configure('Compact.TCombobox',padding=(5,2))
+        s.configure('TCombobox',padding=(6,4),arrowsize=14)
+        s.map('TCombobox',fieldbackground=[('readonly','#1c293b')],foreground=[('readonly','#e4ecf7')])
+        s.configure('TCheckbutton',padding=3)
+        s.configure('TLabelframe',bordercolor='#304057',borderwidth=1)
+        s.configure('TLabelframe.Label',foreground='#b2c4d9')
+        s.configure('Vertical.TScrollbar',background='#33465e',troughcolor='#151e2b',arrowsize=12)
+        for name,color in [('Pass','#1c5545'),('Fail','#7b293b'),('Warning','#6c4d1c'),('Pending','#243449')]:
+            s.configure('Photo'+name+'.TButton',background=color,foreground='#ffffff',borderwidth=2,padding=4)
             s.map('Photo'+name+'.TButton',background=[('active',color),('pressed',color)])
-        self.samples_colors = {'fail':'#692739','unevaluated':'#604919','pass':'#174436','pending':'#243954'}
+        self.samples_colors = {'fail':'#692739','unevaluated':'#604919','pass':'#174436','pending':'#243449'}
 
     def _build_operations(self):
-        top = ttk.Frame(self.ops,padding=10)
+        top = ttk.Frame(self.ops,padding=8)
         top.pack(fill='x')
-        ttk.Label(top,text='Número de parte').grid(row=0,column=0,sticky='w')
         self.op_part = tk.StringVar()
-        self.op_combo = ttk.Combobox(top,textvariable=self.op_part,state='readonly',width=28)
-        self.op_combo.grid(row=1,column=0,padx=(0,12),sticky='ew')
+        self.op_combo = ttk.Combobox(top,textvariable=self.op_part,state='readonly',width=24)
+        ttk.Label(top,text='Número de parte').grid(row=0,column=0,sticky='w',pady=(0,3))
+        self.op_combo.grid(row=1,column=0,padx=(0,8),sticky='ew')
         self.op_combo.bind('<<ComboboxSelected>>',lambda e:self._select_operation())
-        self.operator = tk.StringVar()
-        self.lot = tk.StringVar()
-        self.order = tk.StringVar()
+        top.columnconfigure(0,weight=2)
+        self.operator,self.lot,self.order = tk.StringVar(),tk.StringVar(),tk.StringVar()
         self.context_widgets = []
         for col,label,var in [(1,'Operador',self.operator),(2,'Lote',self.lot),(3,'Orden (opcional)',self.order)]:
-            ttk.Label(top,text=label).grid(row=0,column=col,sticky='w')
-            entry = ttk.Entry(top,textvariable=var,width=20)
-            entry.grid(row=1,column=col,sticky='ew',padx=(0,10))
+            ttk.Label(top,text=label).grid(row=0,column=col,sticky='w',pady=(0,3))
+            entry = ttk.Entry(top,textvariable=var,width=14)
+            entry.grid(row=1,column=col,sticky='ew',padx=(0,8))
             self.context_widgets.append(entry)
             top.columnconfigure(col,weight=1)
         self.lot.trace_add('write',lambda *args:self._refresh_counts())
         self.lot.trace_add('write',lambda *args:self._refresh_recent() if hasattr(self,'recent') else None)
-        self.op_description = ttk.Label(self.ops,text='Sin modelo seleccionado',padding=(12,4))
+        self.op_description = ttk.Label(self.ops,text='Sin modelo seleccionado',padding=(8,2))
         self.op_description.pack(fill='x')
-        main = ttk.Panedwindow(self.ops,orient='horizontal')
-        main.pack(fill='both',expand=True,pady=8)
-        self.video = ImageCanvas(main,width=720,height=300)
-        main.add(self.video,weight=4)
-        side = ttk.Frame(main,padding=12)
-        main.add(side,weight=1)
-        self.result_label = ttk.Label(side,text='SIN EVALUACIÓN',style='Result.TLabel',foreground='#a6b6cb',wraplength=300)
+        main = ctk.CTkFrame(self.ops,fg_color='#0b111b',corner_radius=6)
+        main.pack(fill='both',expand=True,padx=8,pady=6)
+        main.grid_columnconfigure(0,weight=1)
+        main.grid_columnconfigure(1,minsize=270)
+        main.grid_rowconfigure(0,weight=1)
+        self.video = ImageCanvas(main,width=640,height=280)
+        self.video.grid(row=0,column=0,sticky='nsew',padx=4,pady=4)
+        side = ttk.Frame(main,padding=10,width=270)
+        side.grid(row=0,column=1,sticky='nsew',padx=(0,4),pady=4)
+        self.result_label = ttk.Label(side,text='SIN EVALUACIÓN',style='Result.TLabel',foreground='#a6b6cb',wraplength=240)
         self.result_label.pack(fill='x')
         self.cycle_status = tk.StringVar(value='Inspección pausada')
-        ttk.Label(side,textvariable=self.cycle_status,wraplength=280).pack(fill='x',pady=6)
-        self.zone_results = ttk.Label(side,text='Las zonas aparecerán al evaluar.',wraplength=280,justify='left')
-        self.zone_results.pack(fill='x',pady=12)
+        ttk.Label(side,textvariable=self.cycle_status,wraplength=240).pack(fill='x',pady=4)
+        self.zone_results = ttk.Label(side,text='Las zonas aparecerán al evaluar.',wraplength=240,justify='left')
+        self.zone_results.pack(fill='x',pady=6)
         self.ref_preview = ttk.Label(side,text='Referencia del modelo')
-        self.ref_preview.pack(pady=8)
+        self.ref_preview.pack(pady=4)
         self.counts = tk.StringVar(value='Total: 0   |   OK: 0   |   NG: 0   |   NG: 0.0 %')
-        ttk.Label(self.ops,textvariable=self.counts,style='Accent.TLabel',padding=8).pack(fill='x')
-        actions = ttk.Frame(self.ops,padding=(8,0))
-        actions.pack(fill='x')
-        self.start_button = button(actions,'Iniciar inspección',self.start_or_pause)
-        self.choose_button = button(actions,'Buscar número de parte',self.choose_part)
+        ttk.Label(self.ops,textvariable=self.counts,style='Accent.TLabel',padding=(8,4)).pack(fill='x')
+        actions = ActionBar(self.ops)
+        actions.pack(fill='x',padx=8,pady=(0,4))
+        self.start_button = button(actions,'Iniciar inspección',self.start_or_pause,tone='primary')
+        self.choose_button = button(actions,'Buscar parte',self.choose_part)
         button(actions,'Última inspección',self.show_last)
-        button(actions,'Historial y fotografías',self.show_history)
+        button(actions,'Historial y fotos',self.show_history)
         self.recent = table(self.ops,[('time','Hora',130),('part','Parte',160),('lot','Lote',120),
                                      ('outcome','Resultado',110),('version','Versión',80)],height=3)
         self.recent.bind('<Double-1>',lambda e:self._open_event(self.recent))
         self.ops.bind('<Configure>',self._responsive_operation)
 
     def _responsive_operation(self,event):
-        # Keep the camera, result and actions visible on smaller laptop screens.
         frame = self.recent.master
-        if event.height < 650 and frame.winfo_manager():
+        if event.height < 700 and frame.winfo_manager():
             frame.pack_forget()
-        elif event.height >= 650 and not frame.winfo_manager():
-            frame.pack(fill='both',expand=True)
+        elif event.height >= 700 and not frame.winfo_manager():
+            frame.pack(fill='both',expand=False)
 
     def _build_admin(self):
-        self.admin_tabs = ttk.Notebook(self.admin)
+        self.admin_tabs = TabPanel(self.admin)
         self.admin_tabs.pack(fill='both',expand=True)
-        catalog = ttk.Frame(self.admin_tabs,padding=10)
-        self.editor = ttk.Frame(self.admin_tabs,padding=8)
+        catalog = ttk.Frame(self.admin_tabs,padding=8)
+        self.editor = ttk.Frame(self.admin_tabs,padding=6)
         self.admin_tabs.add(catalog,text='Números de parte')
-        self.admin_tabs.add(self.editor,text='Configuración del modelo')
+        self.admin_tabs.add(self.editor,text='Configurar modelo')
         search = ttk.Frame(catalog)
-        search.pack(fill='x',pady=(0,8))
-        ttk.Label(search,text='Buscar:').pack(side='left')
+        search.pack(fill='x',pady=(0,6))
+        ttk.Label(search,text='Buscar parte').pack(side='left')
         self.search = tk.StringVar()
-        ttk.Entry(search,textvariable=self.search,width=35).pack(side='left',padx=8)
+        ttk.Entry(search,textvariable=self.search,width=28).pack(side='left',padx=8)
         self.archived = tk.BooleanVar(value=False)
         ttk.Checkbutton(search,text='Mostrar archivados',variable=self.archived,command=self._refresh_catalog).pack(side='left')
         self.search.trace_add('write',lambda *a:self._refresh_catalog())
-        self.catalog = table(catalog,[('part','Número de parte',170),('description','Descripción',220),
-                                      ('refs','OK / 10',80),('zones','Zonas',65),('state','Estado',210),
-                                      ('version','Versión',65),('saved','Guardado',160)],height=12)
+        self.catalog = table(catalog,[('part','Número de parte',145),('description','Descripción',200),
+                                      ('refs','OK / 10',65),('zones','Zonas',60),('state','Estado',190),
+                                      ('version','Versión',65),('saved','Guardado',155)],height=9)
         self.catalog.bind('<Double-1>',lambda e:self.open_model())
         self.catalog.bind('<<TreeviewSelect>>',lambda e:self._catalog_thumbnail())
         self.catalog_photo = ttk.Label(catalog,text='Selecciona un modelo para ver su referencia.')
-        self.catalog_photo.pack(anchor='w',pady=6)
-        actions = ttk.Frame(catalog)
+        self.catalog_photo.pack(anchor='w',pady=4)
+        actions = ActionBar(catalog)
         actions.pack(fill='x')
-        for text,action in [('Nuevo',self.new_model),('Abrir',self.open_model),('Renombrar / descripción',self.rename_model),
-                            ('Duplicar',self.duplicate_model),('Archivar / restaurar',self.archive_model)]:
-            button(actions,text,action)
-        extra = ttk.Frame(catalog)
+        for text,action in [('Nuevo',self.new_model),('Abrir',self.open_model),('Renombrar',self.rename_model),
+                            ('Duplicar',self.duplicate_model),('Archivar / restaurar',self.archive_model),
+                            ('Exportar modelo',self.export_model),('Importar paquete',self.import_model)]:
+            button(actions,text,action,tone='primary' if text in ('Nuevo','Abrir') else 'neutral')
+        extra = ActionBar(catalog)
         extra.pack(fill='x')
-        for text,action in [('Exportar modelo',self.export_model),('Importar paquete',self.import_model),
-                            ('Importar modelos v3/v4',self.import_legacy),('Cambiar contraseña',self.change_password),
+        for text,action in [('Importar v3/v4',self.import_legacy),('Cambiar contraseña',self.change_password),
                             ('Errores del catálogo',self.show_catalog_errors)]:
             button(extra,text,action)
         bar = ttk.Frame(self.editor)
-        bar.pack(fill='x')
-        self.model_title = ttk.Label(bar,text='Abre o crea un número de parte.',style='Accent.TLabel')
-        self.model_title.pack(side='left',fill='x',expand=True)
+        bar.pack(fill='x',pady=(0,3))
+        bar.columnconfigure(0,weight=1)
+        self.model_title = ttk.Label(bar,text='Abre o crea un número de parte.',style='Accent.TLabel',wraplength=650)
+        self.model_title.grid(row=0,column=0,sticky='w')
         self.dirty_label = ttk.Label(bar,text='',foreground='#ffca78')
-        self.dirty_label.pack(side='right')
-        actions = ttk.Frame(self.editor)
-        actions.pack(fill='x',pady=(5,8))
-        for text,action in [('Guardar configuración',self.save_model),('Restaurar guardada',self.discard_changes),
-                            ('Recuperar versión anterior',self.restore_previous),('Comprobar / probar ajustes',self.try_settings)]:
-            button(actions,text,action)
-        body = ttk.Panedwindow(self.editor,orient='horizontal')
-        body.pack(fill='both',expand=True)
-        scroll = ScrollFrame(body)
-        body.add(scroll,weight=1)
-        controls = scroll.inner
+        self.dirty_label.grid(row=0,column=1,sticky='e',padx=8)
+        actions = ActionBar(self.editor)
+        actions.pack(fill='x',pady=(0,5))
+        self.save_button = button(actions,'Guardar configuración',self.save_model,tone='primary')
+        button(actions,'Restaurar guardada',self.discard_changes)
+        button(actions,'Versión anterior',self.restore_previous)
+        button(actions,'Comprobar ajustes',self.try_settings)
+        self.editor_workspace = ttk.Frame(self.editor)
+        self.editor_workspace.pack(fill='both',expand=True)
+        self.editor_workspace.columnconfigure(0,minsize=280)
+        self.editor_workspace.columnconfigure(1,weight=1)
+        self.editor_workspace.rowconfigure(0,weight=1)
+        self.control_tabs = TabPanel(self.editor_workspace,width=280)
+        self.control_tabs.grid(row=0,column=0,sticky='nsew',padx=(0,6))
+        self.control_tabs.grid_propagate(False)
+        panels = {}
+        for title in ('Zonas','Cámara','Ajustes'):
+            scroll = ScrollFrame(self.control_tabs)
+            self.control_tabs.add(scroll,text=title)
+            panels[title] = scroll.inner
         self.fields = {}
-        def field(key,label,value,values=None):
-            ttk.Label(controls,text=label).pack(anchor='w',padx=8,pady=(8,2))
+        def field(parent,key,label,value,values=None):
+            row = ttk.Frame(parent)
+            row.pack(fill='x',padx=6,pady=(5,0))
+            row.columnconfigure(1,weight=1)
+            ttk.Label(row,text=label,wraplength=132).grid(row=0,column=0,sticky='w',padx=(0,6))
             var = tk.StringVar(value=str(value))
             self.fields[key] = var
-            widget = ttk.Combobox(controls,textvariable=var,values=values,state='readonly') if values else ttk.Entry(controls,textvariable=var)
-            widget.pack(fill='x',padx=8)
+            widget = ttk.Combobox(row,textvariable=var,values=values,state='readonly',width=8) if values else ttk.Entry(row,textvariable=var,width=9)
+            widget.grid(row=0,column=1,sticky='ew')
             var.trace_add('write',self._mark_dirty)
-        field('camera.index','Número de cámara',0,list(range(11)))
-        field('camera.width','Ancho solicitado (píxeles)',1280)
-        field('camera.height','Alto solicitado (píxeles)',720)
-        for key,label in [('exposure','Exposición'),('focus','Enfoque'),('white_balance','Temperatura de blanco')]:
-            field('camera.'+key,label+' (vacío = sin solicitar ajuste)','')
-        row = ttk.Frame(controls,padding=8)
-        row.pack(fill='x')
+        camera = panels['Cámara']
+        ttk.Label(camera,text='DISPOSITIVO Y RESOLUCIÓN',style='Accent.TLabel').pack(anchor='w',padx=6,pady=6)
+        field(camera,'camera.index','Cámara',0,list(range(11)))
+        field(camera,'camera.width','Ancho (px)',1280)
+        field(camera,'camera.height','Alto (px)',720)
+        row = ActionBar(camera)
+        row.pack(fill='x',padx=6,pady=6)
         button(row,'Abrir cámara',self.open_camera)
-        button(row,'Usar resolución real',self.use_actual_resolution)
-        details = ttk.Frame(controls,padding=(8,0))
-        details.pack(fill='x')
-        button(details,'Detalles de cámara',self.camera_details)
-        field('brightness','Brillo (-100 a 100)',0)
-        field('contrast','Contraste (50 a 300)',100)
-        field('tolerance','Tolerancia base (2000 a 15000)',5000)
-        ttk.Label(controls,text='Mayor tolerancia o porcentaje admite diferencias mayores.',wraplength=320,
-                  style='Muted.TLabel').pack(fill='x',padx=8,pady=5)
-        field('absence_seconds','Segundos para confirmar retiro (0.1 a 10)',.6)
-        field('zone_count','Zonas activas',3,[3,5])
+        button(row,'Resolución real',self.use_actual_resolution)
+        button(row,'Detalles',self.camera_details)
+        ttk.Label(camera,text='Ajustes opcionales · vacío conserva el valor de la cámara.',wraplength=238,style='Muted.TLabel').pack(fill='x',padx=6,pady=5)
+        for key,label in [('exposure','Exposición'),('focus','Enfoque'),('white_balance','Balance de blanco')]:
+            field(camera,'camera.'+key,label,'')
+        settings = panels['Ajustes']
+        ttk.Label(settings,text='IMAGEN Y CICLO',style='Accent.TLabel').pack(anchor='w',padx=6,pady=6)
+        field(settings,'brightness','Brillo (-100 a 100)',0)
+        field(settings,'contrast','Contraste (50–300)',100)
+        field(settings,'tolerance','Tolerancia base (2000–15000)',5000)
+        field(settings,'absence_seconds','Retiro de pieza (segundos)',.6)
         self.normalize_color = tk.BooleanVar(value=True)
-        ttk.Checkbutton(controls,text='Normalizar color (comportamiento de v4)',variable=self.normalize_color,
-                        command=self._mark_dirty).pack(anchor='w',padx=8,pady=6)
-        ttk.Label(controls,text='Puede ocultar cambios de color. Desactívalo si el color es un criterio y valida nuevamente.',
-                  wraplength=320,style='Muted.TLabel').pack(fill='x',padx=8)
-        self.zone_fields = {}
-        self.zone_scales = {}
-        self.zone_values = {}
+        ttk.Checkbutton(settings,text='Normalizar color',variable=self.normalize_color,
+                        command=self._mark_dirty).pack(anchor='w',padx=6,pady=(10,4))
+        ttk.Label(settings,text='Desactívalo si el color es un criterio de defecto. Comprueba nuevamente después del cambio.',
+                  wraplength=238,style='Muted.TLabel').pack(fill='x',padx=6)
+        controls = panels['Zonas']
+        field(controls,'zone_count','Zonas activas',3,[3,5])
+        ttk.Label(controls,text='Menor % = mayor sensibilidad.\nGuarda y comprueba después de ajustar.',wraplength=238,
+                  style='Muted.TLabel').pack(fill='x',padx=6,pady=6)
+        self.zone_fields,self.zone_scales,self.zone_values = {},{},{}
         self._updating_zone_scale = False
         for i in range(1,6):
-            box = ttk.LabelFrame(controls,text=f'Zona {i}',padding=6)
-            box.pack(fill='x',padx=8,pady=5)
-            name = tk.StringVar(value=f'Zona {i}')
-            factor = tk.StringVar(value='100')
-            ttk.Entry(box,textvariable=name).pack(fill='x')
-            row = ttk.Frame(box)
-            row.pack(fill='x',pady=4)
-            ttk.Label(row,text='Umbral de zona:').pack(side='left')
+            box = ctk.CTkFrame(controls,fg_color='#1b283a',corner_radius=6,border_width=1,border_color='#304057')
+            box.pack(fill='x',padx=5,pady=(0,6))
+            box.grid_columnconfigure(1,weight=1)
+            ctk.CTkLabel(box,text=f'Z{i}',font=(UI_FONT,13,'bold'),text_color='#35d7b3',width=28).grid(row=0,column=0,padx=(6,4),pady=5)
+            name,factor = tk.StringVar(value=f'Zona {i}'),tk.StringVar(value='100')
+            ttk.Entry(box,textvariable=name,width=14).grid(row=0,column=1,columnspan=2,sticky='ew',padx=(0,6),pady=5)
             value = tk.StringVar(value='100 %')
-            ttk.Label(row,textvariable=value,style='Accent.TLabel').pack(side='right')
-            scale = ttk.Scale(box,from_=1,to=300,orient='horizontal',
-                              command=lambda v,key=str(i):self._zone_scale_moved(key,v))
-            scale.pack(fill='x',pady=(0,4))
-            button(box,'Dibujar / editar zona',lambda idx=i:self.edit_zone(idx))
+            ctk.CTkLabel(box,textvariable=value,font=(UI_FONT,12,'bold'),text_color='#35d7b3',width=52).grid(row=1,column=2,padx=(0,6))
+            scale = ZoneSlider(box,command=lambda v,key=str(i):self._zone_scale_moved(key,v))
+            scale.grid(row=1,column=0,columnspan=2,sticky='ew',padx=(8,4))
             state = ttk.Label(box,text='Sin dibujar',style='Muted.TLabel')
-            state.pack(anchor='w')
+            state.grid(row=2,column=0,columnspan=2,sticky='w',padx=8,pady=5)
+            draw = ActionButton(box,'Dibujar',lambda idx=i:self.edit_zone(idx))
+            draw.grid(row=2,column=2,padx=(0,6),pady=5)
             name.trace_add('write',self._mark_dirty)
             self.zone_fields[str(i)] = (name,factor,state)
-            self.zone_scales[str(i)] = scale
-            self.zone_values[str(i)] = value
+            self.zone_scales[str(i)],self.zone_values[str(i)] = scale,value
             factor.trace_add('write',lambda *args,key=str(i):self._zone_factor_changed(key))
             scale.set(100)
-        right = ttk.Panedwindow(body,orient='vertical')
-        body.add(right,weight=3)
+        right = ttk.Frame(self.editor_workspace)
+        right.grid(row=0,column=1,sticky='nsew')
+        right.columnconfigure(0,weight=1)
+        right.rowconfigure(0,weight=3,minsize=170)
+        right.rowconfigure(1,weight=2,minsize=280)
         preview = ttk.Frame(right)
-        right.add(preview,weight=2)
-        self.admin_video = ImageCanvas(preview,width=650,height=190)
-        self.admin_video.pack(fill='both',expand=True)
-        preview_controls = ttk.Frame(preview)
-        preview_controls.pack(side='bottom',fill='x',before=self.admin_video)
-        row = ttk.Frame(preview_controls,padding=(4,2))
-        row.pack(fill='x')
-        button(row,'Dibujar región general',self.edit_roi)
-        button(row,'Abrir / reconectar cámara',self.open_camera)
-        self.live_button = button(row,'Probar inspección en vivo',self.toggle_live_test)
-        self.roi_label = ttk.Label(preview_controls,text='Región: sin configurar',padding=(6,2))
-        self.roi_label.pack(fill='x')
-        self.live_status = ttk.Label(preview_controls,text='Prueba en vivo detenida · no modifica producción',padding=(6,2),wraplength=780)
-        self.live_status.pack(fill='x')
-        self.editor_tabs = ttk.Notebook(right)
-        right.add(self.editor_tabs,weight=3)
-        self.photo_fields = {}
-        self.photo_targets = {}
-        self.photo_baselines = {}
+        preview.grid(row=0,column=0,sticky='nsew',pady=(0,5))
+        preview.grid_propagate(False)
+        preview.columnconfigure(0,weight=1)
+        preview.rowconfigure(0,weight=1)
+        self.admin_video = ImageCanvas(preview,width=600,height=120)
+        self.admin_video.grid(row=0,column=0,sticky='nsew')
+        row = ActionBar(preview)
+        row.grid(row=1,column=0,sticky='ew',pady=(3,0))
+        self.roi_button = button(row,'Dibujar región',self.edit_roi)
+        button(row,'Reconectar cámara',self.open_camera)
+        self.live_button = button(row,'Probar en vivo',self.toggle_live_test,tone='primary')
+        status_row = ttk.Frame(preview)
+        status_row.grid(row=2,column=0,sticky='ew',pady=(2,0))
+        self.roi_label = ttk.Label(status_row,text='Sin región',style='Muted.TLabel')
+        self.roi_label.pack(side='left',padx=(0,10))
+        self.live_status = ttk.Label(status_row,text='Prueba detenida · no modifica producción',wraplength=500)
+        self.live_status.pack(side='left',fill='x',expand=True)
+        self.editor_tabs = TabPanel(right)
+        self.editor_tabs.grid(row=1,column=0,sticky='nsew')
+        self.editor_tabs.grid_propagate(False)
+        self.photo_fields,self.photo_targets,self.photo_baselines = {},{},{}
         self._photo_loading = False
         self.sample_galleries = {}
         self.selected_sample_ids = {'OK':None,'NG':None}
         gallery = ttk.Frame(self.editor_tabs)
         self.reference_page = gallery
         self.editor_tabs.add(gallery,text='Fotos OK · referencia')
-        self.gallery_info = ttk.Label(gallery,text='0 / 10 referencias OK',style='Accent.TLabel')
-        self.gallery_info.pack(anchor='w',pady=4)
-        row = ttk.Frame(gallery)
+        self.gallery_info = ttk.Label(gallery,text='0 / 10 referencias OK',style='Accent.TLabel',wraplength=650)
+        self.gallery_info.pack(fill='x',pady=3)
+        row = ActionBar(gallery)
         row.pack(fill='x')
-        self.capture_ok_button = button(row,'CAPTURAR OK',self.capture_reference)
-        button(row,'Repetir seleccionada',self.retake_reference)
-        button(row,'Importar imagen',self.import_reference)
-        button(row,'Eliminar',self.remove_reference)
-        self.ref_buttons = []
-        split = ttk.Panedwindow(gallery,orient='horizontal')
+        self.capture_ok_button = button(row,'Capturar OK',self.capture_reference,tone='primary')
+        button(row,'Repetir',self.retake_reference)
+        button(row,'Importar',self.import_reference)
+        button(row,'Eliminar',self.remove_reference,tone='danger')
+        split = ttk.Frame(gallery)
         split.pack(fill='both',expand=True)
+        split.columnconfigure(0,weight=1)
+        split.columnconfigure(1,minsize=250)
+        split.rowconfigure(0,weight=1)
         ref_scroll = ScrollFrame(split)
-        split.add(ref_scroll,weight=1)
+        ref_scroll.grid(row=0,column=0,sticky='nsew')
         self.reference_scroller = ref_scroll
         grid = ref_scroll.inner
-        details = ttk.Frame(split)
-        split.add(details,weight=1)
+        grid.bind('<Configure>',self._layout_reference_grid,add='+')
+        details = ttk.Frame(split,width=250)
+        details.grid(row=0,column=1,sticky='nsew',padx=(5,0))
+        details.pack_propagate(False)
+        self.ref_buttons = []
         for i in range(10):
             b = ttk.Button(grid,text=f'OK {i+1}\nSin imagen',command=lambda idx=i:self.select_reference(idx))
             b.grid(row=i//2,column=i%2,sticky='nsew',padx=3,pady=3)
             b.bind('<Double-1>',lambda e,idx=i:self.view_reference(idx))
             self.ref_buttons.append(b)
         for i in range(2):
-            grid.columnconfigure(i,weight=1)
+            grid.columnconfigure(i,weight=1,uniform='reference')
         self._build_photo_details(details,'reference')
-        for truth,title in [('NG','Fotos NG')]:
-            page = ttk.Frame(self.editor_tabs)
-            self.editor_tabs.add(page,text=title)
-            ttk.Label(page,text='Captura 10 fotos NG y selecciona cada miniatura para describir el defecto.',
-                      wraplength=750).pack(fill='x',pady=2)
-            row = ttk.Frame(page)
-            row.pack(fill='x')
-            capture = button(row,'CAPTURAR '+truth,lambda value=truth:self.capture_sample(value))
-            button(row,'Repetir seleccionada',lambda value=truth:self.retake_sample(value))
-            button(row,'Importar imagen',lambda value=truth:self.import_sample(value))
-            button(row,'Eliminar',lambda value=truth:self.remove_sample(value))
-            split = ttk.Panedwindow(page,orient='horizontal')
-            split.pack(fill='both',expand=True)
-            left = ttk.Frame(split)
-            split.add(left,weight=1)
-            thumbnails = ScrollFrame(left)
-            thumbnails.pack(fill='both',expand=True)
-            grid = thumbnails.inner
-            nav = ttk.Frame(left)
-            nav.pack(side='bottom',fill='x',before=thumbnails)
-            previous = button(nav,'Anterior',lambda value=truth:self.sample_page(value,-1))
-            next_button = button(nav,'Siguiente',lambda value=truth:self.sample_page(value,1))
-            info = ttk.Label(nav,text='Sin fotografías')
-            info.pack(side='left',padx=4)
-            self.sample_galleries[truth] = dict(page=page,grid=grid,offset=0,images=[],scroller=thumbnails,
-                info=info,previous=previous,next=next_button,capture=capture)
-            details = ttk.Frame(split)
-            split.add(details,weight=1)
-            self._build_photo_details(details,truth)
+        truth = 'NG'
+        page = ttk.Frame(self.editor_tabs)
+        self.editor_tabs.add(page,text='Fotos NG')
+        ttk.Label(page,text='10 fotos NG · selecciona una miniatura para describir el defecto.',
+                  wraplength=650).pack(fill='x',pady=3)
+        row = ActionBar(page)
+        row.pack(fill='x')
+        capture = button(row,'Capturar NG',lambda:self.capture_sample('NG'),tone='warning')
+        button(row,'Repetir',lambda:self.retake_sample('NG'))
+        button(row,'Importar',lambda:self.import_sample('NG'))
+        button(row,'Eliminar',lambda:self.remove_sample('NG'),tone='danger')
+        split = ttk.Frame(page)
+        split.pack(fill='both',expand=True)
+        split.columnconfigure(0,weight=1)
+        split.columnconfigure(1,minsize=250)
+        split.rowconfigure(0,weight=1)
+        left = ttk.Frame(split)
+        left.grid(row=0,column=0,sticky='nsew')
+        thumbnails = ScrollFrame(left)
+        nav = ttk.Frame(left)
+        nav.pack(side='bottom',fill='x')
+        previous = button(nav,'Anterior',lambda:self.sample_page('NG',-1))
+        next_button = button(nav,'Siguiente',lambda:self.sample_page('NG',1))
+        info = ttk.Label(nav,text='Sin fotos')
+        info.pack(side='left',padx=3)
+        thumbnails.pack(fill='both',expand=True)
+        self.sample_galleries[truth] = dict(page=page,grid=thumbnails.inner,offset=0,images=[],scroller=thumbnails,
+            info=info,previous=previous,next=next_button,capture=capture)
+        thumbnails.inner.bind('<Configure>',lambda event:self._layout_sample_grid('NG'),add='+')
+        details = ttk.Frame(split,width=250)
+        details.grid(row=0,column=1,sticky='nsew',padx=(5,0))
+        details.pack_propagate(False)
+        self._build_photo_details(details,truth)
         validation_scroll = ScrollFrame(self.editor_tabs)
         validation = validation_scroll.inner
         self.editor_tabs.add(validation_scroll,text='Comprobación')
-        ttk.Label(validation,text='Se comprueban las mismas 10 OK de referencia y 10 NG. No necesitas capturar más fotos OK.',
-                  wraplength=650).pack(fill='x',pady=4)
-        self.samples_table = table(validation,[('piece','Pieza',100),('truth','Real',55),('check','Resultado de foto',150),
-                                  ('defect','Tipo de defecto',140),('note','Notas',180)],height=5)
+        ttk.Label(validation,text='Comprueba las mismas 10 OK + 10 NG; no se requieren más referencias.',
+                  wraplength=650).pack(fill='x',pady=3)
+        row = ActionBar(validation)
+        row.pack(fill='x')
+        button(row,'Comprobar 10 OK + 10 NG',self.run_validation,tone='primary')
+        button(row,'Habilitar inspección',self.approve_model)
+        row = ActionBar(validation)
+        row.pack(fill='x')
+        button(row,'Ver foto',self.view_sample)
+        button(row,'Editar detalles',self.edit_sample)
+        button(row,'Siguiente error',self.show_problem_photo)
+        self.samples_table = table(validation,[('piece','Pieza',90),('truth','Real',50),('check','Resultado de foto',150),
+                                  ('defect','Defecto',130),('note','Notas',150)],height=4)
         for state,color in self.samples_colors.items():
             self.samples_table.tag_configure(state,background=color,foreground='#ffffff')
         self.samples_table.bind('<Double-1>',lambda e:self.edit_sample())
-        row = ttk.Frame(validation)
-        row.pack(fill='x',pady=4)
-        button(row,'Ver fotografía',self.view_sample)
-        button(row,'Editar detalles',self.edit_sample)
-        button(row,'Siguiente foto con problema',self.show_problem_photo)
-        row = ttk.Frame(validation)
-        row.pack(fill='x')
-        button(row,'Comprobar 10 OK + 10 NG',self.run_validation)
-        button(row,'Habilitar versión para inspección',self.approve_model)
-        self.validation_info = ttk.Label(validation,text='Sin pruebas de esta versión.',wraplength=650,justify='left',padding=8)
+        self.validation_info = ttk.Label(validation,text='Sin pruebas de esta versión.',wraplength=650,justify='left',padding=4)
         self.validation_info.pack(fill='x')
-        ttk.Label(validation,text='Verde: resultado correcto · Rojo: error · Ámbar: sin evaluar o resultado anterior.',
-                  style='Muted.TLabel',wraplength=650).pack(fill='x')
+        ttk.Label(validation,text='Verde: correcto · Rojo: error · Ámbar: sin evaluar / resultado anterior.',
+                  style='Muted.TLabel',wraplength=650).pack(fill='x',pady=3)
         ttk.Label(validation,text='Las OK se reutilizan para formar y comprobar la referencia. '
-                  'Es una comprobación de ajuste; no mide el desempeño con piezas nuevas.',
-                  wraplength=650,style='Muted.TLabel').pack(fill='x',pady=8)
+                  'Esta comprobación no mide el desempeño con piezas nuevas.',
+                  wraplength=650,style='Muted.TLabel').pack(fill='x',pady=3)
+        right.bind('<Configure>',self._resize_editor,add='+')
+
+    def _resize_editor(self,event):
+        width = max(280,event.width-20)
+        for widget in (self.gallery_info,self.validation_info):
+            widget.configure(wraplength=width)
+        self.live_status.configure(wraplength=max(220,width-145))
+        self.model_title.configure(wraplength=max(300,self.editor.winfo_width()-210))
 
     def _build_photo_details(self,parent,key):
-        box = ttk.LabelFrame(parent,text='Detalles de la fotografía seleccionada',padding=6)
-        box.pack(fill='both',expand=True,padx=3,pady=3)
+        box = ttk.LabelFrame(parent,text='Detalles de foto',padding=5)
+        box.pack(fill='both',expand=True)
+        actions = ActionBar(box)
+        actions.pack(side='bottom',fill='x',pady=(3,0))
+        button(actions,'Aplicar',lambda value=key:self.apply_photo_details(value))
+        button(actions,'Ampliar',lambda value=key:self.view_photo(value))
+        scroll = ScrollFrame(box)
+        scroll.pack(fill='both',expand=True)
+        content = scroll.inner
         variables = {name:tk.StringVar() for name in ('piece_id','defect_type','note')}
-        title = ttk.Label(box,text='Selecciona una miniatura.',wraplength=290)
-        title.grid(row=0,column=0,columnspan=2,sticky='w')
-        ttk.Label(box,text='ID de pieza:').grid(row=1,column=0,sticky='w',pady=3)
-        piece = ttk.Entry(box,textvariable=variables['piece_id'],width=14)
-        piece.grid(row=1,column=1,sticky='ew',padx=4)
-        ttk.Label(box,text='Defecto:' if key == 'NG' else 'Detalle:').grid(row=2,column=0,sticky='w')
-        defect = ttk.Combobox(box,textvariable=variables['defect_type'],width=18,
+        title = ttk.Label(content,text='Selecciona una miniatura.',wraplength=210)
+        title.grid(row=0,column=0,columnspan=2,sticky='w',pady=(0,3))
+        ttk.Label(content,text='ID pieza').grid(row=1,column=0,sticky='w',padx=(0,4))
+        piece = ttk.Entry(content,textvariable=variables['piece_id'],width=12,style='Compact.TEntry')
+        piece.grid(row=1,column=1,sticky='ew',pady=2)
+        ttk.Label(content,text='Defecto' if key == 'NG' else 'Detalle').grid(row=2,column=0,sticky='w',padx=(0,4))
+        defect = ttk.Combobox(content,textvariable=variables['defect_type'],width=12,style='Compact.TCombobox',
                   values=['Faltante','Mal colocado','Invertido','Dañado','Incorrecto','Rayadura'] if key == 'NG' else ['Conforme'])
-        defect.grid(row=2,column=1,sticky='ew',padx=4,pady=3)
-        ttk.Label(box,text='Notas:').grid(row=3,column=0,sticky='w')
-        note = ttk.Entry(box,textvariable=variables['note'])
-        note.grid(row=3,column=1,sticky='ew',padx=4,pady=3)
-        row = ttk.Frame(box)
-        row.grid(row=4,column=0,columnspan=2,sticky='ew')
-        button(row,'Aplicar detalles',
-               lambda value=key:self.apply_photo_details(value))
-        button(row,'Ampliar',lambda value=key:self.view_photo(value))
-        diagnosis = ttk.Label(box,text='',wraplength=290)
-        diagnosis.grid(row=5,column=0,columnspan=2,sticky='w',pady=(2,0))
-        box.columnconfigure(1,weight=1)
-        self.photo_fields[key] = dict(variables=variables,title=title,widgets=[piece,defect,note],diagnosis=diagnosis)
+        defect.grid(row=2,column=1,sticky='ew',pady=2)
+        ttk.Label(content,text='Notas').grid(row=3,column=0,sticky='w',padx=(0,4))
+        note = ttk.Entry(content,textvariable=variables['note'],width=12,style='Compact.TEntry')
+        note.grid(row=3,column=1,sticky='ew',pady=2)
+        diagnosis = ttk.Label(content,text='',wraplength=210)
+        diagnosis.grid(row=4,column=0,columnspan=2,sticky='w',pady=(3,0))
+        content.columnconfigure(1,weight=1)
+        self.photo_fields[key] = dict(variables=variables,title=title,widgets=[piece,defect,note],diagnosis=diagnosis,
+                                      actions=actions,scroller=scroll)
         for var in variables.values():
             var.trace_add('write',lambda *args,value=key:self._photo_edited(value))
         self._fill_photo_details(key,None)
+
+    def _layout_reference_grid(self,event=None):
+        if hasattr(self,'ref_buttons'):
+            self._layout_thumbnails(self.reference_scroller.inner,self.ref_buttons)
+
+    def _layout_sample_grid(self,truth):
+        grid = self.sample_galleries[truth]['grid']
+        self._layout_thumbnails(grid,grid.winfo_children())
+
+    @staticmethod
+    def _layout_thumbnails(grid,widgets):
+        cols = max(2,min(4,grid.winfo_width()//180))
+        grid.photo_columns = cols
+        for col in range(4):
+            grid.columnconfigure(col,weight=1 if col<cols else 0,uniform='photos' if col<cols else '')
+        for i,widget in enumerate(widgets):
+            widget.grid_configure(row=i//cols,column=i%cols)
 
     def _load_photo_report(self):
         self.photo_report = self.store.photo_results(self.model) if self.model else {}
@@ -2096,7 +2301,9 @@ class Application:
             index = int(sid.split(':')[1])
             self.select_reference(index)
             self.editor_tabs.select(self.reference_page)
-            self.reference_scroller.inner.master.yview_moveto((index//2)/5)
+            cols = getattr(self.reference_scroller.inner,'photo_columns',2)
+            rows = math.ceil(10/cols)
+            self.reference_scroller.inner.master.yview_moveto((index//cols)/rows)
         else:
             self._select_sample(sid)
             self.editor_tabs.select(self.sample_galleries['NG']['page'])
@@ -2243,6 +2450,7 @@ class Application:
                 b.bind(event,gallery['scroller'].scroll_callback)
         for i in range(2):
             gallery['grid'].columnconfigure(i,weight=1)
+        self._layout_sample_grid(truth)
         pages = max(1,(count+7)//8)
         gallery['info'].configure(text=f'{count}/10 fotos {truth} · {offset//8+1}/{pages}')
         gallery['previous'].state(['!disabled'] if offset else ['disabled'])
@@ -2298,7 +2506,7 @@ class Application:
     def _set_admin_editable(self, enabled):
         def walk(parent):
             for w in parent.winfo_children():
-                if isinstance(w, (ttk.Button, ttk.Entry, ttk.Combobox, ttk.Spinbox, ttk.Checkbutton,ttk.Scale)):
+                if isinstance(w, (ActionButton, ZoneSlider, ttk.Button, ttk.Entry, ttk.Combobox, ttk.Spinbox, ttk.Checkbutton,ttk.Scale)):
                     w.state(['!disabled'] if enabled else ['disabled'])
                 walk(w)
         walk(self.admin)
@@ -2456,7 +2664,7 @@ class Application:
         self.ops.pack_forget()
         self.admin.pack(fill='both',expand=True)
         self.mode_label.configure(text='ADMINISTRACIÓN')
-        self.access_button.configure(text='Salir y bloquear Administración')
+        self.access_button.configure(text='Salir de Administración')
         self.message.set('Los ajustes de prueba no se guardan automáticamente.')
         self._refresh_catalog()
 
@@ -2822,7 +3030,7 @@ class Application:
             b.configure(image=photo,text=text,compound='top')
             self._decorate_photo(b,f'reference:{i}',entry,text)
         self.gallery_info.configure(text=f'{count} / 10 referencias legibles · seleccionada: {self.gallery_slot+1} · alineación pendiente de comprobar')
-        self.roi_label.configure(text=f"Región general: {self.draft['roi'] or 'sin configurar'}")
+        self.roi_label.configure(text='Región definida' if self.draft['roi'] else 'Sin región')
         self._fill_photo_details('reference',self.draft['references'][self.gallery_slot],self.gallery_slot)
 
     def select_reference(self,index):
@@ -3088,7 +3296,7 @@ class Application:
         self.live_cycle = None
         self.live_output = None
         if hasattr(self,'live_button'):
-            self.live_button.configure(text='Probar inspección en vivo')
+            self.live_button.configure(text='Probar en vivo')
             self.live_status.configure(text=reason,foreground='#9cabc1')
 
     @admin_action
@@ -3105,7 +3313,7 @@ class Application:
             self.live_running = True
             self.live_generation += 1
             self.live_last_stamp = 0.
-            self.live_button.configure(text='Detener prueba en vivo')
+            self.live_button.configure(text='Detener prueba')
             self.live_status.configure(text='PRUEBA EN VIVO · ajustes actuales · sin conteo de producción',foreground='#ffcb78')
             self.message.set('Prueba de inspección activa en Administración. No requiere habilitar el modelo ni aprobar las NG.')
         self._submit(lambda:VisionEngine(self.store,m),done,'Preparando prueba en vivo con las 10 OK; las NG no bloquean esta prueba…')
@@ -3553,6 +3761,9 @@ class Application:
             self.root.after_cancel(self.report_idle_id)
         self.camera.close()
         self.executor.shutdown(wait=False,cancel_futures=True)
+        # Incluye los temporizadores de dibujo y escala de CustomTkinter.
+        for pending in self.root.tk.call('after','info'):
+            self.root.after_cancel(pending)
         self.root.destroy()
 
 
@@ -3567,16 +3778,17 @@ def main():
     parser = argparse.ArgumentParser(description='Poka-Yoke 5 · Administración e inspección local')
     parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parent/'datos',
                         help='Ubicación de modelos, contraseña y registros; por defecto datos junto al programa')
-    parser.add_argument('--version',action='version',version='Poka-Yoke 5.3.1')
+    parser.add_argument('--version',action='version',version='Poka-Yoke 5.4.0')
     args = parser.parse_args()
     try:
         import tkinter as tk
         from tkinter import messagebox
     except ImportError as e:
-        print(f'Falta una dependencia: {e}\nInstala con: python -m pip install numpy opencv-python Pillow',file=sys.stderr)
+        print(f'Falta una dependencia: {e}\nInstala con: python -m pip install numpy opencv-python Pillow customtkinter',file=sys.stderr)
         return 1
     try:
-        root = tk.Tk()
+        ctk.set_appearance_mode('dark')
+        root = ctk.CTk()
     except tk.TclError as e:
         print(f'No hay un entorno gráfico disponible: {e}',file=sys.stderr)
         return 1

@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 import tkinter as tk
+import customtkinter as ctk
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -34,7 +35,7 @@ class GuiTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.camera=FakeCamera()
-        self.root=tk.Tk()
+        self.root=ctk.CTk()
         self.app=Application(self.root,self.temp.name,camera=self.camera)
         self.errors=[]
         self.root.report_callback_exception=lambda exc,val,tb:self.errors.append(val)
@@ -137,8 +138,8 @@ class GuiTests(unittest.TestCase):
 
     def test_zone_sliders_show_and_persist_their_own_thresholds(self):
         self.admin();m=self.model_in_editor()
-        from tkinter import ttk
-        self.assertIsInstance(self.app.zone_scales['1'],ttk.Scale)
+        import customtkinter as ctk
+        self.assertIsInstance(self.app.zone_scales['1'],ctk.CTkSlider)
         self.app.zone_scales['1'].set(200.7)
         self.app.zone_scales['2'].set(1)
         self.assertEqual(self.app.zone_values['1'].get(),'201 %')
@@ -490,6 +491,88 @@ class GuiTests(unittest.TestCase):
         footer=self.app.body.master.winfo_children()[-1]
         self.assertLessEqual(footer.winfo_rooty()+footer.winfo_height(),
                              self.root.winfo_rooty()+self.root.winfo_height())
+
+    def assert_control_visible(self,widget):
+        self.assertTrue(widget.winfo_ismapped(),str(widget))
+        x,y=widget.winfo_rootx(),widget.winfo_rooty()
+        right,bottom=x+widget.winfo_width(),y+widget.winfo_height()
+        parent=widget.master
+        while parent is not None:
+            self.assertGreaterEqual(x,parent.winfo_rootx()-1,str(widget))
+            self.assertGreaterEqual(y,parent.winfo_rooty()-1,str(widget))
+            self.assertLessEqual(right,parent.winfo_rootx()+parent.winfo_width()+1,str(widget))
+            self.assertLessEqual(bottom,parent.winfo_rooty()+parent.winfo_height()+1,str(widget))
+            parent=parent.master
+        hit=self.root.winfo_containing(x+widget.winfo_width()//2,y+widget.winfo_height()//2)
+        while hit is not None and hit != widget:
+            hit=hit.master
+        self.assertIs(hit,widget,'Control tapado: '+str(widget))
+
+    def test_admin_buttons_fit_all_photo_sections_at_laptop_sizes(self):
+        self.admin();self.model_in_editor()
+        self.camera.frame=images()[2]
+        self.app.capture_sample('NG')
+        for size in ('1000x680','1280x720','1440x900'):
+            self.root.geometry(size)
+            for page,capture,key in ((self.app.reference_page,self.app.capture_ok_button,'reference'),
+                                    (self.app.sample_galleries['NG']['page'],self.app.sample_galleries['NG']['capture'],'NG')):
+                self.app.editor_tabs.select(page);self.pump(.12)
+                for widget in (self.app.save_button,self.app.camera_button,self.app.access_button,
+                               self.app.roi_button,self.app.live_button,capture,*capture.master.actions,
+                               *self.app.photo_fields[key]['actions'].actions,
+                               self.app.photo_fields[key]['widgets'][2]):
+                    with self.subTest(size=size,page=key,widget=str(widget)):
+                        self.assert_control_visible(widget)
+            self.app.editor_tabs.select('Comprobación');self.pump(.1)
+            validation=self.app.editor_tabs.pages[2][0].inner
+            from poka_yoke_mejorado5 import ActionBar
+            for bar in (w for w in validation.winfo_children() if isinstance(w,ActionBar)):
+                for widget in bar.actions:self.assert_control_visible(widget)
+            self.app.control_tabs.select('Cámara');self.pump(.1)
+            camera=self.app.control_tabs.pages[1][0].inner
+            for bar in (w for w in camera.winfo_children() if isinstance(w,ActionBar)):
+                for widget in bar.actions:self.assert_control_visible(widget)
+            self.app.control_tabs.select('Zonas')
+
+    def test_wrapping_toolbar_keeps_actions_visible_and_clickable(self):
+        from poka_yoke_mejorado5 import ActionBar,button
+        dialog=ctk.CTkToplevel(self.root);dialog.geometry('310x200')
+        bar=ActionBar(dialog);bar.pack(fill='x',padx=5)
+        clicked=[]
+        for text in ('Guardar configuración','Restaurar guardada','Comprobar ajustes'):
+            button(bar,text,lambda value=text:clicked.append(value))
+        self.pump(.2)
+        self.assertGreater(bar.winfo_height(),34)
+        for widget in bar.actions:
+            self.assert_control_visible(widget);widget.invoke()
+        self.assertEqual(len(clicked),3)
+        dialog.destroy()
+
+    def test_background_task_disables_custom_controls_and_restores_zone_states(self):
+        self.admin();self.model_in_editor()
+        self.app._set_admin_editable(False)
+        for widget in (self.app.save_button,self.app.capture_ok_button,self.app.zone_scales['1']):
+            self.assertTrue(widget.instate(['disabled']))
+        self.app._set_admin_editable(True)
+        self.assertFalse(self.app.save_button.instate(['disabled']))
+        self.assertFalse(self.app.zone_scales['1'].instate(['disabled']))
+        self.assertTrue(self.app.zone_scales['4'].instate(['disabled']))
+
+    def test_catalog_actions_and_scaled_controls_remain_accessible(self):
+        from poka_yoke_mejorado5 import ActionBar
+        self.admin();self.model_in_editor()
+        self.root.geometry('1000x680')
+        self.app.admin_tabs.select(0);self.pump(.15)
+        catalog=self.app.admin_tabs.pages[0][0]
+        for bar in (w for w in catalog.winfo_children() if isinstance(w,ActionBar)):
+            for widget in bar.actions:self.assert_control_visible(widget)
+        self.app.admin_tabs.select(self.app.editor)
+        try:
+            ctk.set_widget_scaling(1.25);self.pump(.25)
+            for widget in (self.app.save_button,self.app.roi_button,self.app.live_button,self.app.capture_ok_button):
+                self.assert_control_visible(widget)
+        finally:
+            ctk.set_widget_scaling(1.0);self.pump(.1)
 
     def test_history_can_open_original_and_export_filtered_records(self):
         m=make_model(self.app.store)

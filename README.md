@@ -1,6 +1,6 @@
 # Poka-Yoke 5
 
-Versión **5.3.1**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.4.0**. Aplicación local de inspección visual para ensambles, con interfaz industrial oscura en **CustomTkinter** y modos de Administración e Inspección separados. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
 
 ## Ejecutar
 
@@ -11,18 +11,34 @@ python -m pip install -r requirements.txt
 python poka_yoke_mejorado5.py
 ```
 
-En Windows puedes usar `py -3` en lugar de `python`. Para actualizar, cierra el programa y reemplaza únicamente el archivo `.py`, conservando tu carpeta `datos`.
+En Windows puedes usar `py -3` en lugar de `python`. Para actualizar, cierra el programa y reemplaza únicamente el archivo `.py`, conservando tu carpeta `datos`. Si vienes de una versión anterior, instala una vez la nueva dependencia con `python -m pip install "customtkinter>=5.2.2,<6"`. Si sólo descargas el `.py`, puedes instalar todas las dependencias con `python -m pip install numpy opencv-python Pillow customtkinter`.
+
+## Interfaz industrial y distribución compacta
+
+La ventana admite tamaños desde **1000 × 680**. Las acciones usan botones de 30 píxeles de alto antes del escalado de pantalla; las barras los distribuyen en varias filas cuando falta ancho, en lugar de recortarlos. Verde identifica acciones principales, ámbar la captura NG y rojo la eliminación. Cada botón también conserva su texto.
+
+En **Configurar modelo**, el panel lateral tiene tres pestañas: **Zonas** reúne los nombres, sliders de 1–300 % y botones de dibujo; **Cámara** agrupa el dispositivo, resolución y propiedades; **Ajustes** contiene brillo, contraste, tolerancia base, normalización de color y retiro de pieza. Cada panel tiene desplazamiento vertical.
+
+La cámara permanece visible sobre las pestañas OK, NG y Comprobación. Las miniaturas se distribuyen en **2, 3 o 4 columnas** según el ancho disponible. Los detalles de la foto están a la derecha; **Aplicar** y **Ampliar** permanecen fijos mientras los detalles largos se desplazan. Las acciones para comprobar y habilitar una versión están al principio de Comprobación.
+
+[Ver la distribución a 1000 × 680](docs/interfaz_industrial_1000x680.png).
+
+![Administración con la interfaz industrial](docs/interfaz_industrial_admin.png)
+
+![Inspección con cámara, resultado y controles](docs/interfaz_industrial_inspeccion.png)
+
+Capturas de la aplicación con cámara e imágenes sintéticas. El rediseño conserva modelos, fotos, configuraciones, contraseña, historial y criterios de evaluación de la versión anterior.
 
 ## Cámara
 
-La cámara se abre automáticamente al iniciar, aunque no haya un modelo registrado. El botón **Abrir / reconectar cámara** está visible en la parte superior. La vista previa no inicia la inspección ni incrementa contadores.
+La cámara se abre automáticamente al iniciar, aunque no haya un modelo registrado. El botón **Reconectar cámara** está visible en la parte superior. La vista previa no inicia la inspección ni incrementa contadores.
 
 En Administración puedes seleccionar otro número de cámara y su resolución. Al cargar un modelo se abre su cámara automáticamente. El estado inferior informa la resolución real y los errores; en Windows se intentan otros controladores si el primero abre el dispositivo pero no entrega imágenes.
 
 ## Preparar un número de parte con sólo 10 OK y 10 NG
 
 1. Entra a Administración y establece tu contraseña local en el primer uso.
-2. Crea un número de parte, o copia tus modelos anteriores con **Importar modelos v3/v4** sin modificar los originales.
+2. Crea un número de parte, o copia tus modelos anteriores con **Importar v3/v4** sin modificar los originales.
 3. Configura la cámara y dibuja la región general de la pieza.
 4. En **Fotos OK · referencia**, pulsa **CAPTURAR OK** hasta completar diez fotos conformes. **Estas mismas diez fotos son la referencia del modelo. No se solicita un segundo grupo de OK.**
 5. Dibuja tres o cinco zonas y asigna sus nombres.
@@ -31,13 +47,13 @@ En Administración puedes seleccionar otro número de cámara y su resolución. 
 8. En **Comprobación**, pulsa **Comprobar 10 OK + 10 NG**. Se utilizan las diez OK ya guardadas y las diez NG: no necesitas más capturas.
 9. Revisa el resultado y habilita esa versión si las veinte fotos se evaluaron correctamente. Después sal de Administración, selecciona el número de parte e introduce operador y lote para inspeccionar.
 
-Una vez completas las diez fotos de cada clase, utiliza **Repetir seleccionada** para sustituir una. No se agregan fotos adicionales desde los botones de captura. Si un modelo anterior tiene muestras adicionales, se conservan; la comprobación utiliza las diez posiciones OK de referencia y las primeras diez NG. Las muestras OK adicionales de versiones anteriores ya no se piden ni se usan para este requisito.
+Una vez completas las diez fotos de cada clase, utiliza **Repetir** para sustituir una. No se agregan fotos adicionales desde los botones de captura. Si un modelo anterior tiene muestras adicionales, se conservan; la comprobación utiliza las diez posiciones OK de referencia y las primeras diez NG. Las muestras OK adicionales de versiones anteriores ya no se piden ni se usan para este requisito.
 
 ## Umbral por zona con deslizadores
 
 Cada zona tiene un deslizador y su valor visible. El rango es de **1 % a 300 % de la calibración automática**; conserva el significado de los límites de versiones anteriores. Un porcentaje menor aumenta la sensibilidad; uno mayor permite diferencias mayores. El límite calculado conserva un mínimo de 6 píxeles de área del defecto; el deslizador no cambia los umbrales de diferencia de color por píxel. Las zonas 4 y 5 quedan desactivadas cuando seleccionas el modo de tres zonas.
 
-Los ajustes son temporales hasta pulsar **Guardar configuración**. Al volver a seleccionar ese número de parte se recuperan sus valores, sin mezclarlos con los de otro modelo. **Restaurar guardada** descarta el borrador; **Recuperar versión anterior** recupera ajustes e imágenes anteriores como otra versión pendiente de comprobar.
+Los ajustes son temporales hasta pulsar **Guardar configuración**. Al volver a seleccionar ese número de parte se recuperan sus valores, sin mezclarlos con los de otro modelo. **Restaurar guardada** descarta el borrador; **Versión anterior** recupera ajustes e imágenes anteriores como otra versión pendiente de comprobar.
 
 ## Miniaturas y detalles de cada foto
 
@@ -45,9 +61,9 @@ La cámara permanece visible encima de las galerías. Las miniaturas aparecen a 
 
 Al capturar, la foto queda seleccionada y puedes editar **ID de pieza**, **tipo de defecto o característica** y **notas**, sin preguntas emergentes para clasificarla. La sección determina OK o NG. Puedes elegir un tipo sugerido o escribir uno propio; esa etiqueta es una anotación del administrador, no un diagnóstico automático del motor.
 
-Usa el mismo ID si varias fotos corresponden a la misma pieza física. **Aplicar detalles** prepara los cambios en el borrador; **Guardar configuración** los conserva en ese número de parte. La comprobación cuenta fotografías: diez vistas de una misma pieza no demuestran el comportamiento con diez piezas diferentes.
+Usa el mismo ID si varias fotos corresponden a la misma pieza física. **Aplicar** prepara los cambios en el borrador; **Guardar configuración** los conserva en ese número de parte. La comprobación cuenta fotografías: diez vistas de una misma pieza no demuestran el comportamiento con diez piezas diferentes.
 
-**Repetir seleccionada** conserva los detalles al cambiar su imagen. **Ampliar** abre la fotografía grande. También puedes importar imágenes compatibles, eliminar capturas y exportar/importar modelos completos con sus detalles.
+**Repetir** conserva los detalles al cambiar su imagen. **Ampliar** abre la fotografía grande. También puedes importar imágenes compatibles, eliminar capturas y exportar/importar modelos completos con sus detalles.
 
 ## Cómo interpretar la comprobación
 
@@ -66,7 +82,7 @@ Guarda los ajustes y pulsa **Comprobar 10 OK + 10 NG**. Cada miniatura y fila de
 - **Ámbar:** fotografía sin evaluación, por ejemplo porque no se localiza la pieza. Se informa el motivo; no se cuenta como defecto detectado.
 - **Sin comprobar:** no hay un resultado de esa configuración.
 
-Al terminar se abre la primera foto con problemas. **Siguiente foto con problema**, en Comprobación, permite recorrer las demás. Selecciona una miniatura y pulsa **Ampliar** para ver su imagen, etiqueta esperada, resultado, coincidencia, mediciones por zona y explicación del error. Las referencias OK que no se alinean quedan identificadas por su posición.
+Al terminar se abre la primera foto con problemas. **Siguiente error**, en Comprobación, permite recorrer las demás. Selecciona una miniatura y pulsa **Ampliar** para ver su imagen, etiqueta esperada, resultado, coincidencia, mediciones por zona y explicación del error. Las referencias OK que no se alinean quedan identificadas por su posición.
 
 La comprobación continúa con las demás fotos si una imagen está dañada o tiene dimensiones incorrectas. Cuando un error en las referencias impide construir el patrón, las fotos afectadas se señalan y las demás quedan sin evaluar con la explicación correspondiente.
 
@@ -78,7 +94,7 @@ Ejemplo generado con imágenes sintéticas para comprobar la interfaz.
 
 ## Probar inspección en vivo antes de habilitar producción
 
-En Administración, junto a la cámara, pulsa **Probar inspección en vivo**. Necesitas diez OK utilizables, las zonas configuradas y una imagen compatible de cámara. **Las pruebas NG fallidas, incompletas o sus archivos dañados no bloquean esta prueba administrativa.** Si una referencia OK no permite construir el patrón, debe corregirse antes.
+En Administración, junto a la cámara, pulsa **Probar en vivo**. Necesitas diez OK utilizables, las zonas configuradas y una imagen compatible de cámara. **Las pruebas NG fallidas, incompletas o sus archivos dañados no bloquean esta prueba administrativa.** Si una referencia OK no permite construir el patrón, debe corregirse antes.
 
 La pantalla muestra **PRUEBA**, el resultado y las zonas. El ciclo evalúa una vez y espera retiro de la pieza; puedes detener y volver a iniciar para repetir una prueba. No habilita el modelo, no incrementa contadores de producción ni guarda automáticamente inspecciones de producción.
 
@@ -96,7 +112,7 @@ La carpeta de datos está excluida de Git. Para respaldar todo, cierra el progra
 
 ## Verificación y límites
 
-Esta versión pasó **77 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores, diagnósticos por foto, compatibilidad del historial anterior, pruebas en vivo sin habilitación y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. No se verificó una cámara física ni su controlador de Windows.
+Esta versión pasó **81 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores, diagnósticos por foto, compatibilidad del historial anterior, pruebas en vivo sin habilitación y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. Las pruebas de distribución comprueban límites y acceso a botones a **1000 × 680, 1280 × 720 y 1440 × 900**, barras con varias filas y escalado de controles al 125 %. No se verificó una cámara física ni su controlador de Windows.
 
 Comprueba en tu equipo enfoque, iluminación, resolución, velocidad y resultados con piezas reales. La presencia y el retiro se estiman visualmente; no hay un sensor físico de presencia. El motor indica diferencias por zona, sin diagnosticar automáticamente el tipo de defecto.
 
