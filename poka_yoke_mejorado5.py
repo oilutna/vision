@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Poka-Yoke 5.4.0 — interfaz industrial con CustomTkinter, archivo único.
+"""Poka-Yoke 5.5.0 — interfaz industrial con CustomTkinter, archivo único.
 
 Ejecutar: python poka_yoke_mejorado5.py
 Dependencias: python -m pip install numpy opencv-python Pillow customtkinter
@@ -1619,7 +1619,7 @@ class ActionButton(ctk.CTkButton):
         color,hover = colors[tone]
         from tkinter import font as tkfont
         font = tkfont.Font(root=parent,family=UI_FONT,size=10)
-        width = max(64,font.measure(text)+24)
+        width = kw.pop('width',max(64,font.measure(text)+24))
         self._measure_font = font
         super().__init__(parent,text=text,command=command,width=width,height=30,
                          corner_radius=5,border_width=1,border_color='#40516a',
@@ -1758,6 +1758,144 @@ def table(parent, columns, height=10):
     return tree
 
 
+class PhotoUndoHistory:
+    """Historial temporal: revierte sólo fotos modificadas, conserva los demás ajustes."""
+    def __init__(self,limit=20):
+        self.limit = limit
+        self.actions = []
+
+    def clear(self):
+        self.actions.clear()
+
+    def remember(self,before,after,label):
+        refs = {i:copy.deepcopy(old) for i,(old,new) in enumerate(zip(before['references'],after['references'])) if old != new}
+        old = {e['id']:(i,e) for i,e in enumerate(before['samples'])}
+        new = {e['id']:e for e in after['samples']}
+        samples = {sid:copy.deepcopy(old.get(sid)) for sid in old.keys()|new.keys()
+                   if (old[sid][1] if sid in old else None) != new.get(sid)}
+        base_changed = before['base_image'] != after['base_image']
+        if refs or samples or base_changed:
+            self.actions.append(dict(refs=refs,samples=samples,base_changed=base_changed,
+                                     base=copy.deepcopy(before['base_image']),label=label))
+            self.actions = self.actions[-self.limit:]
+
+    def undo(self,config):
+        if not self.actions:
+            raise ValueError('No hay movimientos de fotos para deshacer desde el último guardado.')
+        action = self.actions.pop()
+        c = copy.deepcopy(config)
+        for index,entry in action['refs'].items():
+            c['references'][index] = entry
+        changes = action['samples']
+        c['samples'] = [entry for entry in c['samples'] if entry['id'] not in changes]
+        for position,entry in sorted(value for value in changes.values() if value is not None):
+            c['samples'].insert(min(position,len(c['samples'])),entry)
+        if action['base_changed']:
+            c['base_image'] = action['base']
+        return c,action['label']
+
+
+def zone_feedback(result):
+    """Traduce mediciones sin alterar el criterio del motor ni sus límites."""
+    rows = []
+    for z in result.get('zonas',[]) if result else []:
+        area,limit = z['pix'],z['lim']
+        message = 'Dentro del límite' if z['ok'] else f'Supera el límite por {area-limit} px'
+        rows.append(dict(idx=z['idx'],name=z.get('name',f"Zona {z['idx']}"),ok=z['ok'],
+                         text=f"Diferencia {area} / límite {limit} px",message=message,
+                         fraction=min(1.,max(0.,area/max(1,limit)))))
+    return rows
+
+
+def production_phase(state):
+    if 'esperando retiro' in state.lower() or state.startswith(('Retira','Confirmando retiro')):
+        return 'RETIRE LA PIEZA','#ffca78'
+    if state.startswith('Esperando pieza'):
+        return 'ESPERANDO PIEZA','#35d7b3'
+    if state.startswith('Estabilizando'):
+        return 'MANTENGA LA PIEZA FIJA','#ffca78'
+    if state.startswith('Evaluando'):
+        return 'EVALUANDO','#78c4ff'
+    return 'SIN EVALUACIÓN','#a6b6cb'
+
+
+def build_photo_comparison(store,model,entry):
+    """Prepara una vista de la región que realmente evalúa el motor; nunca registra producción."""
+    image = store.image(model['id'],entry)
+    c = model['config']
+    packet = dict(reference=None,sample=image,result=None,entry=copy.deepcopy(entry),
+                  reference_title='Referencia OK disponible',sample_title='Foto completa',note='',zones=[])
+    for available in c['references']:
+        if not available:
+            continue
+        try:
+            packet['reference'] = store.image(model['id'],available)
+            break
+        except (ValueError,OSError,cv2.error):
+            pass
+    try:
+        engine = VisionEngine(store,model)
+    except (ValueError,OSError,cv2.error) as error:
+        packet['note'] = 'Sin evaluación: '+str(error)
+        return packet
+    packet['reference'] = cv2.cvtColor(engine.cache['media_u8'],cv2.COLOR_LAB2BGR)
+    packet['reference_title'] = 'Patrón de las 10 OK'
+    result,_,note = engine.evaluate_sample(image,entry)
+    packet.update(result=result,note=note)
+    if result is None:
+        packet['sample_title'] = 'Foto sin localizar · sin evaluación'
+        return packet
+    adjusted = image if entry.get('processed') else engine.adjust(image)
+    _,x,y = engine.locate(adjusted) if entry['kind'] != 'crop' else (0,0,0)
+    roi = engine._roi_alineada(adjusted,x,y,engine.cache)
+    packet['sample'] = cv2.cvtColor(np.clip(roi,0,255).astype(np.uint8),cv2.COLOR_LAB2BGR)
+    packet['sample_title'] = 'Foto seleccionada · alineada y normalizada'
+    packet['zones'] = result['zonas']
+    if not result['ok'] and all(z['ok'] for z in result['zonas']):
+        packet['note'] = 'Las zonas pasan, pero la coincidencia global es insuficiente.'
+    return packet
+
+
+class ZoneReadout(ttk.Frame):
+    """Mediciones y barras compactas reutilizadas entre producción y diagnóstico."""
+    def __init__(self,parent):
+        super().__init__(parent)
+        self.rows = []
+        self.signature = None
+        for _ in range(5):
+            frame = ttk.Frame(self,padding=(0,2))
+            title = ttk.Label(frame,wraplength=235)
+            title.pack(fill='x')
+            value = ttk.Label(frame,wraplength=235,style='Muted.TLabel')
+            value.pack(fill='x')
+            bar = ctk.CTkProgressBar(frame,height=5,fg_color='#304057',progress_color='#35d7b3')
+            bar.pack(fill='x',pady=(2,1))
+            self.rows.append((frame,title,value,bar))
+        self.global_note = ttk.Label(self,wraplength=235,foreground='#ffca78')
+
+    def display(self,result):
+        signature = json.dumps(result,sort_keys=True) if result else ''
+        if signature == self.signature:
+            return
+        self.signature = signature
+        feedback = zone_feedback(result)
+        for i,(frame,title,value,bar) in enumerate(self.rows):
+            if i >= len(feedback):
+                frame.pack_forget()
+                continue
+            row = feedback[i]
+            color = '#35d7b3' if row['ok'] else '#ff6b7b'
+            title.configure(text=row['name']+' · '+('OK' if row['ok'] else 'NG'),foreground=color)
+            value.configure(text=row['text']+'\n'+row['message'])
+            bar.configure(progress_color=color)
+            bar.set(row['fraction'])
+            frame.pack(fill='x',pady=(0,3))
+        self.global_note.pack_forget()
+        if result and not result['ok'] and all(z['ok'] for z in result['zonas']):
+            self.global_note.configure(text='Coincidencia global insuficiente.')
+            self.global_note.pack(fill='x')
+
+
 class Application:
     def __init__(self, root, data_dir, camera=None):
         self.root = root
@@ -1778,6 +1916,9 @@ class Application:
         self.gallery_slot = 0
         self.thumbnails = []
         self.photo_report = {}
+        self.photo_undo = PhotoUndoHistory()
+        self.guide_signature = None
+        self.guide_summary = {}
         self.report_idle_id = None
         self.live_running = False
         self.live_generation = 0
@@ -1786,7 +1927,7 @@ class Application:
         self.live_output = None
         self.live_last_stamp = 0.
         ctk.set_appearance_mode('dark')
-        self.root.title('Poka-Yoke 5.4 · Inspección industrial')
+        self.root.title('Poka-Yoke 5.5 · Inspección industrial')
         width = min(1440,max(800,self.root.winfo_screenwidth()-40))
         height = min(900,max(600,self.root.winfo_screenheight()-60))
         # CTk recibe unidades lógicas; winfo_screen* devuelve píxeles físicos.
@@ -1849,7 +1990,9 @@ class Application:
         s.configure('Title.TLabel',font=(family,20,'bold'))
         s.configure('Accent.TLabel',foreground='#35d7b3',font=(family,10,'bold'))
         s.configure('Muted.TLabel',foreground='#a0afc3')
-        s.configure('Result.TLabel',font=(family,28,'bold'),padding=8)
+        s.configure('Result.TLabel',font=(family,38,'bold'),padding=6)
+        s.configure('Neutral.Result.TLabel',font=(family,18,'bold'),padding=6)
+        s.map('TSpinbox',fieldbackground=[('invalid','#633244')])
         s.configure('TButton',padding=(8,4),background='#243449',borderwidth=1)
         s.map('TButton',background=[('active','#334c69'),('disabled','#1a2534')])
         s.configure('Treeview',background='#111a27',fieldbackground='#111a27',rowheight=27,borderwidth=0)
@@ -1899,13 +2042,19 @@ class Application:
         self.video.grid(row=0,column=0,sticky='nsew',padx=4,pady=4)
         side = ttk.Frame(main,padding=10,width=270)
         side.grid(row=0,column=1,sticky='nsew',padx=(0,4),pady=4)
-        self.result_label = ttk.Label(side,text='SIN EVALUACIÓN',style='Result.TLabel',foreground='#a6b6cb',wraplength=240)
+        self.phase_label = ctk.CTkLabel(side,text='PAUSADA',font=(UI_FONT,14,'bold'),text_color='#a6b6cb',wraplength=240)
+        self.phase_label.pack(fill='x',pady=(0,3))
+        self.result_label = ttk.Label(side,text='SIN EVALUACIÓN',style='Neutral.Result.TLabel',foreground='#a6b6cb',wraplength=240)
         self.result_label.pack(fill='x')
         self.cycle_status = tk.StringVar(value='Inspección pausada')
         ttk.Label(side,textvariable=self.cycle_status,wraplength=240).pack(fill='x',pady=4)
-        self.zone_results = ttk.Label(side,text='Las zonas aparecerán al evaluar.',wraplength=240,justify='left')
-        self.zone_results.pack(fill='x',pady=6)
-        self.ref_preview = ttk.Label(side,text='Referencia del modelo')
+        diagnostic_scroll = ScrollFrame(side)
+        diagnostic_scroll.pack(fill='both',expand=True)
+        self.zone_readout = ZoneReadout(diagnostic_scroll.inner)
+        self.zone_readout.pack(fill='x')
+        self.zone_results = ttk.Label(diagnostic_scroll.inner,text='Las zonas aparecerán al evaluar.',wraplength=235,justify='left')
+        self.zone_results.pack(fill='x',pady=3)
+        self.ref_preview = ttk.Label(diagnostic_scroll.inner,text='Referencia del modelo')
         self.ref_preview.pack(pady=4)
         self.counts = tk.StringVar(value='Total: 0   |   OK: 0   |   NG: 0   |   NG: 0.0 %')
         ttk.Label(self.ops,textvariable=self.counts,style='Accent.TLabel',padding=(8,4)).pack(fill='x')
@@ -1982,10 +2131,11 @@ class Application:
         self.control_tabs.grid(row=0,column=0,sticky='nsew',padx=(0,6))
         self.control_tabs.grid_propagate(False)
         panels = {}
-        for title in ('Zonas','Cámara','Ajustes'):
+        for title in ('Guía','Zonas','Cámara','Ajustes'):
             scroll = ScrollFrame(self.control_tabs)
             self.control_tabs.add(scroll,text=title)
             panels[title] = scroll.inner
+        self._build_preparation_guide(panels['Guía'])
         self.fields = {}
         def field(parent,key,label,value,values=None):
             row = ttk.Frame(parent)
@@ -2026,6 +2176,7 @@ class Application:
         ttk.Label(controls,text='Menor % = mayor sensibilidad.\nGuarda y comprueba después de ajustar.',wraplength=238,
                   style='Muted.TLabel').pack(fill='x',padx=6,pady=6)
         self.zone_fields,self.zone_scales,self.zone_values = {},{},{}
+        self.zone_inputs,self.zone_steps = {},{}
         self._updating_zone_scale = False
         for i in range(1,6):
             box = ctk.CTkFrame(controls,fg_color='#1b283a',corner_radius=6,border_width=1,border_color='#304057')
@@ -2035,9 +2186,21 @@ class Application:
             name,factor = tk.StringVar(value=f'Zona {i}'),tk.StringVar(value='100')
             ttk.Entry(box,textvariable=name,width=14).grid(row=0,column=1,columnspan=2,sticky='ew',padx=(0,6),pady=5)
             value = tk.StringVar(value='100 %')
-            ctk.CTkLabel(box,textvariable=value,font=(UI_FONT,12,'bold'),text_color='#35d7b3',width=52).grid(row=1,column=2,padx=(0,6))
-            scale = ZoneSlider(box,command=lambda v,key=str(i):self._zone_scale_moved(key,v))
-            scale.grid(row=1,column=0,columnspan=2,sticky='ew',padx=(8,4))
+            tuning = ctk.CTkFrame(box,fg_color='transparent',corner_radius=0)
+            tuning.grid(row=1,column=0,columnspan=3,sticky='ew',padx=6)
+            tuning.columnconfigure(1,weight=1)
+            minus = ActionButton(tuning,'−',lambda key=str(i):self._step_zone(key,-1),width=28)
+            minus.grid(row=0,column=0,padx=(0,3))
+            scale = ZoneSlider(tuning,command=lambda v,key=str(i):self._zone_scale_moved(key,v))
+            scale.grid(row=0,column=1,sticky='ew',padx=2)
+            plus = ActionButton(tuning,'+',lambda key=str(i):self._step_zone(key,1),width=28)
+            plus.grid(row=0,column=2,padx=3)
+            numeric = ttk.Spinbox(tuning,from_=1,to=300,increment=1,width=4,justify='right',textvariable=factor)
+            numeric.grid(row=0,column=3,padx=(0,2))
+            ctk.CTkLabel(tuning,text='%',width=12,font=(UI_FONT,12)).grid(row=0,column=4)
+            numeric.bind('<Return>',lambda event,key=str(i):self._commit_zone_factor(key))
+            numeric.bind('<FocusOut>',lambda event,key=str(i):self._commit_zone_factor(key,quiet=True))
+            self.zone_inputs[str(i)],self.zone_steps[str(i)] = numeric,(minus,plus)
             state = ttk.Label(box,text='Sin dibujar',style='Muted.TLabel')
             state.grid(row=2,column=0,columnspan=2,sticky='w',padx=8,pady=5)
             draw = ActionButton(box,'Dibujar',lambda idx=i:self.edit_zone(idx))
@@ -2084,10 +2247,13 @@ class Application:
         self.gallery_info.pack(fill='x',pady=3)
         row = ActionBar(gallery)
         row.pack(fill='x')
+        self.undo_buttons,self.compare_buttons = {},{}
         self.capture_ok_button = button(row,'Capturar OK',self.capture_reference,tone='primary')
         button(row,'Repetir',self.retake_reference)
         button(row,'Importar',self.import_reference)
         button(row,'Eliminar',self.remove_reference,tone='danger')
+        self.undo_buttons['reference'] = button(row,'Deshacer',self.undo_photo)
+        self.compare_buttons['reference'] = button(row,'Comparar OK',lambda:self.compare_photo('reference'))
         split = ttk.Frame(gallery)
         split.pack(fill='both',expand=True)
         split.columnconfigure(0,weight=1)
@@ -2121,6 +2287,8 @@ class Application:
         button(row,'Repetir',lambda:self.retake_sample('NG'))
         button(row,'Importar',lambda:self.import_sample('NG'))
         button(row,'Eliminar',lambda:self.remove_sample('NG'),tone='danger')
+        self.undo_buttons['NG'] = button(row,'Deshacer',self.undo_photo)
+        self.compare_buttons['NG'] = button(row,'Comparar OK',lambda:self.compare_photo('NG'))
         split = ttk.Frame(page)
         split.pack(fill='both',expand=True)
         split.columnconfigure(0,weight=1)
@@ -2170,6 +2338,7 @@ class Application:
                   'Esta comprobación no mide el desempeño con piezas nuevas.',
                   wraplength=650,style='Muted.TLabel').pack(fill='x',pady=3)
         right.bind('<Configure>',self._resize_editor,add='+')
+        self._update_undo_buttons()
 
     def _resize_editor(self,event):
         width = max(280,event.width-20)
@@ -2226,6 +2395,227 @@ class Application:
             grid.columnconfigure(col,weight=1 if col<cols else 0,uniform='photos' if col<cols else '')
         for i,widget in enumerate(widgets):
             widget.grid_configure(row=i//cols,column=i%cols)
+
+    def _build_preparation_guide(self,parent):
+        self.guide_title = ttk.Label(parent,text='PREPARACIÓN · 0/6',style='Accent.TLabel')
+        self.guide_title.pack(anchor='w',padx=6,pady=(6,4))
+        self.guide_rows = []
+        for i,title in enumerate(('Cámara conectada','Región general','Zonas de inspección','10 fotos OK','10 fotos NG','Comprobación')):
+            row = ttk.Frame(parent,padding=(5,3))
+            row.pack(fill='x',padx=3,pady=1)
+            row.columnconfigure(0,weight=1)
+            name = ttk.Label(row,text=f'{i+1}. {title}')
+            name.grid(row=0,column=0,sticky='w')
+            detail = ttk.Label(row,text='Pendiente',style='Muted.TLabel',wraplength=170)
+            detail.grid(row=1,column=0,sticky='w')
+            action = ActionButton(row,'Ir',lambda step=i:self.guide_to(step),width=40)
+            action.grid(row=0,column=1,rowspan=2,padx=(4,0))
+            self.guide_rows.append((name,detail,action))
+        self.guide_next_button = ActionButton(parent,'Siguiente paso',self.guide_next,tone='primary')
+        self.guide_next_button.pack(fill='x',padx=6,pady=6)
+        self.guide_note = ttk.Label(parent,text='Abre o crea un número de parte.',wraplength=238,style='Muted.TLabel')
+        self.guide_note.pack(fill='x',padx=6,pady=3)
+        self.guide_steps = []
+
+    def _update_preparation(self,info=None,stamp=None):
+        if not self.admin_mode or not hasattr(self,'guide_rows'):
+            return
+        c = self.draft
+        if c is None:
+            return
+        if info is None:
+            _,stamp,info = self.camera.snapshot()
+        camera_ok = bool(info.get('ready') and info.get('compatible') and stamp is not None and time.monotonic()-stamp<=1.)
+        requested = getattr(self,'camera_requested',{})
+        camera_ok = camera_ok and info.get('generation') == self.generation and all(requested.get(key)==c['camera'][key] for key in ('index','width','height'))
+        camera_ok = camera_ok and (info.get('width'),info.get('height')) == (c['camera']['width'],c['camera']['height'])
+        try:
+            camera_ok = camera_ok and all(int(self.fields['camera.'+key].get()) == c['camera'][key]
+                                          for key in ('index','width','height'))
+        except ValueError:
+            camera_ok = False
+        try:
+            total = int(self.fields['zone_count'].get())
+        except ValueError:
+            total = 0
+        zones = sum(bool(c['zones'][str(i)]['rect']) for i in range(1,min(total,5)+1))
+        refs = sum(bool(e and (self.store.model_dir(self.model['id'])/e['path']).is_file()) for e in c['references'])
+        ng = sum((self.store.model_dir(self.model['id'])/e['path']).is_file() for e in ng_samples(c))
+        summary = self.guide_summary
+        checked = (not self.dirty and summary.get('reference_ok')==10 and summary.get('reference_total')==10
+                   and summary.get('ng_photo_rejected')==10 and summary.get('ng_photos')==10
+                   and not summary.get('reference_unevaluated') and not summary.get('ng_photo_unevaluated'))
+        failures = sum(info['state'] in ('fail','unevaluated') for info in self.photo_report.values()) if not self.dirty else 0
+        steps = [(camera_ok,'Conectada' if camera_ok else 'Revisar conexión / resolución'),
+                 (bool(c['roi']),'Definida' if c['roi'] else 'Dibuja la pieza'),
+                 (total in (3,5) and zones==total,f'{zones}/{total} zonas dibujadas'),
+                 (refs==10,f'{refs}/10 fotos disponibles'),(ng==10,f'{ng}/10 fotos disponibles'),
+                 (checked,'Correcta' if checked else ('Guarda y comprueba' if self.dirty else
+                     (f'{failures} fotos por revisar' if failures else 'Pendiente de comprobar')))]
+        signature = (tuple(steps),self.dirty,self.model['version'],bool(self.model.get('validation')),self.model['archived'])
+        if signature == self.guide_signature:
+            return
+        self.guide_signature,self.guide_steps = signature,steps
+        for i,((name,detail,_),(done,text)) in enumerate(zip(self.guide_rows,steps)):
+            color = '#35d7b3' if done else ('#ff6b7b' if i==5 and failures else '#ffca78')
+            name.configure(foreground=color)
+            detail.configure(text=('Listo · ' if done else '')+text)
+        completed = sum(done for done,_ in steps)
+        self.guide_title.configure(text=f'PREPARACIÓN · {completed}/6')
+        self.guide_next_button.configure(text='Ver comprobación' if completed==6 else 'Siguiente paso')
+        self.guide_note.configure(text='Modelo archivado; restáuralo desde el catálogo.' if self.model['archived'] else (
+            'Guarda los ajustes antes de comprobar.' if self.dirty else (
+            'Habilita la versión en Comprobación.' if completed==6 and not self.model.get('validation') else
+            ('Modelo habilitado para inspección.' if completed==6 else 'Pulsa Ir para resolver cada pendiente.'))))
+
+    @admin_action
+    def guide_to(self,step):
+        self._need_model()
+        self.admin_tabs.select(self.editor)
+        if step == 0:
+            self.control_tabs.select('Cámara')
+        elif step == 1:
+            self.edit_roi()
+        elif step == 2:
+            self.control_tabs.select('Zonas')
+        elif step == 3:
+            self.editor_tabs.select(self.reference_page)
+        elif step == 4:
+            self.editor_tabs.select(self.sample_galleries['NG']['page'])
+        else:
+            self.editor_tabs.select('Comprobación')
+
+    @admin_action
+    def guide_next(self):
+        self._update_preparation()
+        self.guide_to(next((i for i,(done,_) in enumerate(self.guide_steps) if not done),5))
+
+    def _remember_photo_change(self,before,label):
+        self.photo_undo.remember(before,self.draft,label)
+        self._update_undo_buttons()
+
+    def _update_undo_buttons(self):
+        for widget in getattr(self,'undo_buttons',{}).values():
+            widget.state(['!disabled'] if self.photo_undo.actions and self.task is None else ['disabled'])
+        for key,widget in getattr(self,'compare_buttons',{}).items():
+            widget.state(['!disabled'] if self.task is None and self._photo_entry(key) is not None else ['disabled'])
+
+    @admin_action
+    def undo_photo(self):
+        current = self._sync()
+        self.draft,label = self.photo_undo.undo(current)
+        self.photo_targets.clear()
+        self.photo_baselines.clear()
+        self._mark_dirty()
+        self._refresh_gallery()
+        self._refresh_samples()
+        self._update_undo_buttons()
+        self.message.set('Deshecho: '+label+'. Guarda la configuración para conservar el cambio.')
+
+    def _step_zone(self,key,delta):
+        self._commit_zone_factor(key)
+        value = int(self.zone_fields[key][1].get())
+        self.zone_fields[key][1].set(str(max(1,min(300,value+delta))))
+
+    def _commit_zone_factor(self,key,quiet=False):
+        try:
+            value = int(self.zone_fields[key][1].get())
+            if not 1<=value<=300:
+                raise ValueError()
+        except ValueError:
+            self.zone_inputs[key].state(['invalid'])
+            if not quiet:
+                raise ValueError('El umbral de cada zona debe ser un entero entre 1 y 300 %.') from None
+            return False
+        self.zone_inputs[key].state(['!invalid'])
+        return True
+
+    @admin_action
+    def compare_photo(self,key):
+        c = copy.deepcopy(self._sync())
+        entry = self._photo_entry(key)
+        if entry is None:
+            raise ValueError('Selecciona primero una foto para compararla con las OK.')
+        m = copy.deepcopy(self.model)
+        m['config'] = c
+        entry = dict(entry,truth='OK',kind='crop') if key=='reference' else copy.deepcopy(entry)
+        label = 'Borrador actual' if self.dirty else f"Configuración guardada · v{m['version']}"
+        def done(packet):
+            self._show_photo_comparison(packet,label)
+        self._submit(lambda:build_photo_comparison(self.store,m,entry),done,'Preparando comparación con el patrón OK…')
+
+    def _show_photo_comparison(self,packet,configuration):
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title('Comparar con las OK · '+packet['entry'].get('piece_id','Foto'))
+        dialog.configure(fg_color='#151e2b')
+        scale = ctk.ScalingTracker.get_window_scaling(dialog)
+        width,height = min(1120,self.root.winfo_screenwidth()-40),min(760,self.root.winfo_screenheight()-60)
+        dialog.geometry(f'{int(width/scale)}x{int(height/scale)}')
+        dialog.minsize(int(800/scale),int(600/scale))
+        dialog.transient(self.root)
+        dialog.grid_columnconfigure(0,weight=1)
+        dialog.grid_rowconfigure(2,weight=1)
+        result,entry = packet['result'],packet['entry']
+        outcome = ('OK' if result['ok'] else 'NG') if result else 'SIN EVALUACIÓN'
+        expected = entry.get('truth','')
+        correct = result is not None and outcome==expected
+        verdict = 'COINCIDE CON LA ETIQUETA' if correct else (
+            f'{expected} PASA COMO {outcome}' if result else 'SIN EVALUACIÓN')
+        title = f"{entry.get('piece_id','Foto')} · etiqueta {expected} · resultado {outcome} · {verdict}"
+        verdict_label = ttk.Label(dialog,text=title,foreground='#35d7b3' if correct else '#ffca78',padding=8,wraplength=1000)
+        verdict_label.grid(row=0,column=0,sticky='ew')
+        choices = ActionBar(dialog)
+        choices.grid(row=1,column=0,sticky='ew',padx=8)
+        images = ttk.Frame(dialog)
+        images.grid(row=2,column=0,sticky='nsew',padx=8,pady=3)
+        images.columnconfigure((0,1),weight=1,uniform='comparison')
+        images.rowconfigure(1,weight=1)
+        ttk.Label(images,text=packet['reference_title'],padding=3).grid(row=0,column=0,sticky='w')
+        ttk.Label(images,text=packet['sample_title'],padding=3).grid(row=0,column=1,sticky='w')
+        left,right = ImageCanvas(images,empty_text='Sin referencia OK'),ImageCanvas(images,empty_text='Foto no disponible')
+        left.grid(row=1,column=0,sticky='nsew',padx=(0,3))
+        right.grid(row=1,column=1,sticky='nsew',padx=(3,0))
+        def highlight(selected=None):
+            for canvas,source in ((left,packet['reference']),(right,packet['sample'])):
+                image = source.copy() if source is not None else None
+                if image is not None:
+                    for z in packet['zones']:
+                        active = selected is None or selected==z['idx']
+                        color = ((0,210,110) if z['ok'] else (60,60,245)) if active else (100,115,130)
+                        x1,y1,x2,y2 = z['rect']
+                        cv2.rectangle(image,(x1,y1),(x2,y2),color,3 if active else 1)
+                        cv2.putText(image,f"Z{z['idx']}",(x1+2,y1+16),cv2.FONT_HERSHEY_SIMPLEX,.45,color,1)
+                canvas.display(image)
+        button(choices,'Todas las zonas',highlight)
+        for zone in packet['zones']:
+            button(choices,f"Z{zone['idx']}",lambda idx=zone['idx']:highlight(idx),tone='neutral' if zone['ok'] else 'danger')
+        first_bad = next((z['idx'] for z in packet['zones'] if not z['ok']),None)
+        highlight(first_bad)
+        detail = ScrollFrame(dialog)
+        detail.grid(row=3,column=0,sticky='ew',padx=8)
+        detail.configure(height=154)
+        detail.pack_propagate(False)
+        metrics = ZoneReadout(detail.inner)
+        metrics.display(result)
+        metrics.pack(fill='x')
+        note = configuration+' · Vista de diagnóstico; no guarda ni habilita el modelo.'
+        if packet['note']:
+            note += '\n'+packet['note']
+        note_label = ttk.Label(dialog,text=note,wraplength=1000,padding=5,style='Muted.TLabel')
+        note_label.grid(row=4,column=0,sticky='ew')
+        def resize(event):
+            if event.widget == dialog:
+                verdict_label.configure(wraplength=max(300,event.width-24))
+                note_label.configure(wraplength=max(300,event.width-24))
+        dialog.bind('<Configure>',resize,add='+')
+        actions = ActionBar(dialog)
+        actions.grid(row=5,column=0,sticky='ew',padx=8,pady=(0,5))
+        button(actions,'Cerrar comparación',dialog.destroy)
+        dialog.bind('<Escape>',lambda event:dialog.destroy())
+        dialog.comparison = packet
+        dialog.comparison_canvases = (left,right)
+        dialog.zone_metrics = metrics
+        return dialog
 
     def _load_photo_report(self):
         self.photo_report = self.store.photo_results(self.model) if self.model else {}
@@ -2285,6 +2675,7 @@ class Application:
         self.report_idle_id = None
         if not self.closed:
             self._update_photo_indicators()
+            self._update_preparation()
 
     def show_problem_photo(self):
         self._need_model()
@@ -2342,6 +2733,7 @@ class Application:
             caption = ('Referencia OK '+str(int(target)+1)) if key == 'reference' and entry else (
                       f"Foto {key} · {entry['piece_id']}" if entry else 'Selecciona una miniatura o captura una fotografía.')
             panel['title'].configure(text=caption)
+            self.compare_buttons[key].state(['!disabled'] if entry and self.task is None else ['disabled'])
             if hasattr(self,'ref_buttons'):
                 self._update_photo_indicators()
         finally:
@@ -2467,6 +2859,7 @@ class Application:
         self._updating_zone_scale = True
         try:
             self.zone_fields[key][1].set(str(factor))
+            self.zone_inputs[key].state(['!invalid'])
             self.zone_values[key].set(f'{factor} %')
         finally:
             self._updating_zone_scale = False
@@ -2475,10 +2868,10 @@ class Application:
     def _zone_factor_changed(self,key):
         if self._updating_zone_scale:
             return
-        try:
-            factor = int(self.zone_fields[key][1].get())
-        except ValueError:
+        if not self._commit_zone_factor(key,quiet=True):
+            self._mark_dirty()
             return
+        factor = int(self.zone_fields[key][1].get())
         self._updating_zone_scale = True
         try:
             self.zone_scales[key].set(factor)
@@ -2493,7 +2886,11 @@ class Application:
         except ValueError:
             return
         for key,scale in self.zone_scales.items():
-            scale.state(['!disabled'] if int(key) <= total else ['disabled'])
+            state = ['!disabled'] if int(key) <= total else ['disabled']
+            scale.state(state)
+            self.zone_inputs[key].state(state)
+            for widget in self.zone_steps[key]:
+                widget.state(state)
 
     def _submit(self, work, done, text):
         if self.task is not None:
@@ -2516,6 +2913,7 @@ class Application:
                 if self.photo_targets.get(key) is None:
                     for w in panel['widgets']:
                         w.state(['disabled'])
+            self._update_undo_buttons()
 
     def _need_model(self):
         if self.model is None or self.draft is None:
@@ -2561,6 +2959,8 @@ class Application:
                 self.fields['camera.height'].set(str(old_cam['height']))
                 self.loading = False
                 raise ValueError('Cambio de resolución cancelado.')
+            self.photo_undo.clear()
+            self._update_undo_buttons()
             c['roi'] = c['base_image'] = None
             c['references'],c['samples'] = [None]*10,[]
             for z in c['zones'].values():
@@ -2576,6 +2976,8 @@ class Application:
 
     def _load_editor(self,m):
         self.stop_live_test()
+        self.photo_undo.clear()
+        self.guide_signature = None
         self.loading = True
         try:
             same_model = self.model is not None and self.model['id'] == m['id']
@@ -2607,6 +3009,8 @@ class Application:
         finally:
             self.loading = False
         self._configure_preview(c['camera'])
+        self._update_undo_buttons()
+        self._update_preparation()
 
     def _resolve_dirty(self):
         if not self.dirty:
@@ -2967,6 +3371,8 @@ class Application:
             return
         if any(c['references']) and not messagebox.askyesno('Cambio de región','Cambiar la región vacía las referencias OK del borrador. La versión guardada permanece recuperable. ¿Continuar?',parent=self.root):
             return
+        self.photo_undo.clear()
+        self._update_undo_buttons()
         c['roi'] = dlg.result
         c['references'] = [None]*10
         c['base_image'] = self.store.put_image(self.model['id'],frame)
@@ -3064,7 +3470,7 @@ class Application:
     def _replace_reference(self,image,*,base_frame=None):
         c = self._sync()
         if c['roi'] is None:
-            raise ValueError('Dibuja primero la región general de la pieza en Cámara y región.')
+            raise ValueError('Dibuja primero la región general de la pieza con Dibujar región.')
         x1,y1,x2,y2 = c['roi']
         if image.shape[:2] == (c['camera']['height'],c['camera']['width']):
             base_frame = image
@@ -3073,6 +3479,7 @@ class Application:
             raise ValueError(f'La imagen debe ser un cuadro completo o un recorte de {x2-x1} × {y2-y1}.')
         if c['references'][self.gallery_slot] and not messagebox.askyesno('Reemplazar referencia',f'¿Reemplazar la referencia OK {self.gallery_slot+1} del borrador?',parent=self.root):
             return
+        before = copy.deepcopy(c)
         old = c['references'][self.gallery_slot] or {}
         entry = self.store.put_image(self.model['id'],image)
         entry.update(piece_id=old.get('piece_id',f'REF-{self.gallery_slot+1:02d}'),
@@ -3083,6 +3490,7 @@ class Application:
         self.draft = c
         self._mark_dirty()
         selected = self.gallery_slot
+        self._remember_photo_change(before,f'captura / reemplazo de OK {selected+1}')
         self._refresh_gallery()
         self.message.set(f'Referencia OK {selected+1} preparada. Guarda cuando termines los cambios.')
         return entry
@@ -3093,7 +3501,7 @@ class Application:
             raise ValueError('Dibuja primero la región general de la pieza.')
         empty = next((i for i,e in enumerate(c['references']) if not e),None)
         if empty is None:
-            raise ValueError('Las 10 referencias OK están completas. Usa Repetir seleccionada para reemplazar una.')
+            raise ValueError('Las 10 referencias OK están completas. Usa Repetir para reemplazar una.')
         self.preview_hold_until = 0
         if c['references'][self.gallery_slot]:
             self.gallery_slot = empty
@@ -3121,10 +3529,13 @@ class Application:
     @admin_action
     def remove_reference(self):
         self._need_model()
+        self._flush_photo_details()
         if not self.draft['references'][self.gallery_slot]:
             return
         if messagebox.askyesno('Eliminar referencia','¿Quitar esta referencia del borrador? La versión guardada sigue disponible.',parent=self.root):
+            before = copy.deepcopy(self.draft)
             self.draft['references'][self.gallery_slot] = None
+            self._remember_photo_change(before,f'eliminación de OK {self.gallery_slot+1}')
             self._mark_dirty()
             self._refresh_gallery()
 
@@ -3143,7 +3554,7 @@ class Application:
         if truth != 'NG':
             raise ValueError('La sección de captura debe indicar OK o NG.')
         if sum(s['truth'] == 'NG' for s in c['samples']) >= 10:
-            raise ValueError('Las 10 fotos NG están completas. Usa Repetir seleccionada para reemplazar una.')
+            raise ValueError('Las 10 fotos NG están completas. Usa Repetir para reemplazar una.')
         piece,note = self._next_piece_id(truth),''
         cam = c['camera']
         if image.shape[:2] == (cam['height'],cam['width']):
@@ -3159,9 +3570,11 @@ class Application:
             raise ValueError('Esta imagen ya está guardada como OK. Captura una foto NG.')
         e.update(id=uuid.uuid4().hex,piece_id=piece,truth=truth,kind=kind,note=note,
                  defect_type='Conforme' if truth == 'OK' else '',captured_at=now(),identity_confirmed=False)
+        before = copy.deepcopy(c)
         c['samples'].append(e)
         validate_config(c)
         self.draft = c
+        self._remember_photo_change(before,'captura de '+piece)
         self.selected_sample_ids[truth] = e['id']
         count = sum(s['truth'] == truth for s in c['samples'])
         self.sample_galleries[truth]['offset'] = ((count-1)//8)*8
@@ -3203,7 +3616,9 @@ class Application:
             raise ValueError('Esta imagen corresponde a una OK. Repite la captura con una pieza NG.')
         if not messagebox.askyesno('Repetir fotografía',f"¿Reemplazar la foto de {entry['piece_id']} conservando sus detalles?",parent=self.root):
             return
+        before = copy.deepcopy(c)
         entry.update(asset,kind='full',captured_at=now())
+        self._remember_photo_change(before,'reemplazo de '+entry['piece_id'])
         self._mark_dirty()
         self._refresh_samples()
         self.message.set('Fotografía repetida; se conservaron su identificador, tipo y notas en el borrador.')
@@ -3272,7 +3687,9 @@ class Application:
         self._flush_photo_details()
         e = self._selected_sample(truth)
         if messagebox.askyesno('Eliminar muestra','¿Quitar esta muestra del borrador?',parent=self.root):
+            before = copy.deepcopy(self.draft)
             self.draft['samples'] = [s for s in self.draft['samples'] if s['id'] != e['id']]
+            self._remember_photo_change(before,'eliminación de '+e['piece_id'])
             self._mark_dirty()
             self._refresh_samples()
 
@@ -3280,6 +3697,8 @@ class Application:
         if not self.model:
             return
         s = self.store.validation_summary(self.model)
+        self.guide_summary = s
+        self._update_preparation()
         c = self.model['config']
         ok_count = sum(entry is not None for entry in c['references'])
         ng_count = len(ng_samples(c))
@@ -3398,8 +3817,10 @@ class Application:
         self._submit(work,done,'Verificando requisitos para habilitar la versión…')
 
     def _clear_result(self,state):
-        self.result_label.configure(text='SIN EVALUACIÓN',foreground='#a6b6cb')
+        self.result_label.configure(text='SIN EVALUACIÓN',style='Neutral.Result.TLabel',foreground='#a6b6cb')
         self.zone_results.configure(text='')
+        self.zone_readout.display(None)
+        self.phase_label.configure(text='PAUSADA',text_color='#a6b6cb')
         self.cycle_status.set(state)
 
     def _select_operation(self):
@@ -3501,6 +3922,7 @@ class Application:
             self.generation = self.camera.configure(m['config']['camera'])
             self.camera_requested = copy.deepcopy(m['config']['camera'])
         self.pending_start = True
+        self.phase_label.configure(text='PREPARANDO INSPECCIÓN',text_color='#ffca78')
         self._context_enabled(False)
         self.start_button.configure(text='Cancelar inicio')
         if self.engine and self.engine.model['id'] == m['id'] and self.engine.model['version'] == m['version']:
@@ -3540,14 +3962,15 @@ class Application:
         self.cycle_status.set(out['state']+f" · coincidencia {out['match']:.2f}")
         result = out['result']
         if result:
-            self.result_label.configure(text='OK' if result['ok'] else 'NG',foreground='#35e0b5' if result['ok'] else '#ff6b7b')
-            lines = [f"{z['name']}: {'OK' if z['ok'] else 'DIFERENCIA'} ({z['pix']}/{z['lim']})" for z in result['zonas']]
-            if not result['ok'] and all(z['ok'] for z in result['zonas']):
-                lines.append('Coincidencia global insuficiente.')
-            self.zone_results.configure(text='\n\n'.join(lines))
-        else:
-            self.result_label.configure(text='SIN EVALUACIÓN',foreground='#a6b6cb')
+            self.result_label.configure(text='OK' if result['ok'] else 'NG',style='Result.TLabel',foreground='#35e0b5' if result['ok'] else '#ff6b7b')
             self.zone_results.configure(text='')
+            self.zone_readout.display(result)
+        else:
+            self.result_label.configure(text='SIN EVALUACIÓN',style='Neutral.Result.TLabel',foreground='#a6b6cb')
+            self.zone_results.configure(text='')
+            self.zone_readout.display(None)
+        phase,color = production_phase(out['state'])
+        self.phase_label.configure(text=phase,text_color=color)
         if out.get('record'):
             self.last_event = out['record']
             self._refresh_counts()
@@ -3580,6 +4003,9 @@ class Application:
                         messagebox.showerror('Operación no completada',str(e),parent=self.root)
             frame,stamp,info = self.camera.snapshot()
             self.camera_status.set(info['status'])
+            if self.admin_mode and time.monotonic() >= getattr(self,'guide_next_refresh',0):
+                self.guide_next_refresh = time.monotonic()+.5
+                self._update_preparation(info,stamp)
             fresh = frame is not None and info.get('ready') and time.monotonic()-stamp <= 1.
             if getattr(self,'pending_start',False) and self.engine and self.task is None:
                 if fresh and info.get('compatible'):
@@ -3600,6 +4026,7 @@ class Application:
                     if self.cycle:
                         self.executor.submit(self.cycle.disconnected)
                     self.message.set('Inspección detenida: no hay imagen reciente. Revisa cámara y vuelve a iniciar.')
+                    self.phase_label.configure(text='SIN CÁMARA',text_color='#ff6b7b')
                 self.video.display(None)
                 self.admin_video.display(None)
             elif self.admin_mode:
@@ -3778,7 +4205,7 @@ def main():
     parser = argparse.ArgumentParser(description='Poka-Yoke 5 · Administración e inspección local')
     parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parent/'datos',
                         help='Ubicación de modelos, contraseña y registros; por defecto datos junto al programa')
-    parser.add_argument('--version',action='version',version='Poka-Yoke 5.4.0')
+    parser.add_argument('--version',action='version',version='Poka-Yoke 5.5.0')
     args = parser.parse_args()
     try:
         import tkinter as tk

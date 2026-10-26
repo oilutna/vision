@@ -1,6 +1,6 @@
 # Poka-Yoke 5
 
-Versión **5.4.0**. Aplicación local de inspección visual para ensambles, con interfaz industrial oscura en **CustomTkinter** y modos de Administración e Inspección separados. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.5.0**. Aplicación local de inspección visual para ensambles, con interfaz industrial oscura en **CustomTkinter** y modos de Administración e Inspección separados. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
 
 ## Ejecutar
 
@@ -17,7 +17,7 @@ En Windows puedes usar `py -3` en lugar de `python`. Para actualizar, cierra el 
 
 La ventana admite tamaños desde **1000 × 680**. Las acciones usan botones de 30 píxeles de alto antes del escalado de pantalla; las barras los distribuyen en varias filas cuando falta ancho, en lugar de recortarlos. Verde identifica acciones principales, ámbar la captura NG y rojo la eliminación. Cada botón también conserva su texto.
 
-En **Configurar modelo**, el panel lateral tiene tres pestañas: **Zonas** reúne los nombres, sliders de 1–300 % y botones de dibujo; **Cámara** agrupa el dispositivo, resolución y propiedades; **Ajustes** contiene brillo, contraste, tolerancia base, normalización de color y retiro de pieza. Cada panel tiene desplazamiento vertical.
+En **Configurar modelo**, el panel lateral incluye **Guía** para seguir la preparación y tres pestañas de controles: **Zonas** reúne los nombres, sliders de 1–300 % y botones de dibujo; **Cámara** agrupa el dispositivo, resolución y propiedades; **Ajustes** contiene brillo, contraste, tolerancia base, normalización de color y retiro de pieza. Cada panel tiene desplazamiento vertical.
 
 La cámara permanece visible sobre las pestañas OK, NG y Comprobación. Las miniaturas se distribuyen en **2, 3 o 4 columnas** según el ancho disponible. Los detalles de la foto están a la derecha; **Aplicar** y **Ampliar** permanecen fijos mientras los detalles largos se desplazan. Las acciones para comprobar y habilitar una versión están al principio de Comprobación.
 
@@ -28,6 +28,40 @@ La cámara permanece visible sobre las pestañas OK, NG y Comprobación. Las min
 ![Inspección con cámara, resultado y controles](docs/interfaz_industrial_inspeccion.png)
 
 Capturas de la aplicación con cámara e imágenes sintéticas. El rediseño conserva modelos, fotos, configuraciones, contraseña, historial y criterios de evaluación de la versión anterior.
+
+## Preparación guiada y diagnóstico
+
+En **Guía** se muestra el avance de seis pasos para el número de parte abierto: cámara conectada y compatible, región, zonas activas, diez fotos OK, diez NG y comprobación. **Ir** lleva a cada sección; **Siguiente paso** abre el primer pendiente. Los pasos de fotos cuentan archivos disponibles; la comprobación confirma si pueden evaluarse y si sus resultados coinciden con las etiquetas.
+
+La guía se actualiza al capturar, editar o comprobar. Los cambios sin guardar dejan la comprobación pendiente. Completar la lista no habilita automáticamente la producción: utiliza **Habilitar inspección** en Comprobación después de guardar y obtener resultados correctos.
+
+## Comparar una foto con las OK
+
+Selecciona una miniatura y pulsa **Comparar OK**. La ventana muestra el patrón formado con las mismas diez OK y la región evaluada de la foto seleccionada, alineada y normalizada como la ve el motor. La cabecera distingue la etiqueta indicada por el administrador del resultado calculado: una foto NG aceptada aparece como **NG PASA COMO OK**.
+
+Las zonas tienen contornos verdes o rojos. Se resalta primero la zona que falla; **Todas las zonas** y **Z1**, **Z2**, etc. permiten cambiar el resaltado. Las mediciones y barras muestran el área de diferencia, su límite y cuánto lo supera. Si no hay coincidencia suficiente, se conserva la foto completa y se indica **SIN EVALUACIÓN**. Si faltan referencias utilizables, se puede ver una OK disponible sin inventar un resultado.
+
+La comparación usa una copia de los ajustes actuales. Indica si corresponde al borrador o a una versión guardada. No guarda nuevas referencias, no habilita el modelo y no añade inspecciones ni contadores de producción.
+
+![Comparación del patrón OK y una foto NG](docs/comparacion_ok_ng.png)
+
+[Ver el ejemplo de una NG que pasa como OK](docs/comparacion_ng_pasa_ok.png).
+
+## Ajuste numérico y deshacer fotos
+
+Cada slider de zona tiene un campo numérico de **1 a 300 %** y botones **− / +** para cambiar de uno en uno. Campo y slider permanecen sincronizados; los valores fuera del rango se marcan y deben corregirse antes de guardar. Los controles de las zonas 4 y 5 se desactivan con el modo de tres zonas.
+
+![Sliders y campos numéricos por zona](docs/ajuste_preciso_zonas.png)
+
+**Deshacer**, disponible en ambas galerías, revierte hasta los últimos veinte movimientos de fotos del borrador: captura, importación, reemplazo o eliminación. Una acción cancelada o fallida no ocupa el lugar de la última acción válida. Al recuperar una foto se conservan sus detalles anteriores; se mantienen los ajustes y las ediciones posteriores de otras fotos.
+
+Este historial es temporal: se limpia al guardar, cargar o restaurar un modelo, cambiar de número de parte, región o resolución. No borra archivos del historial guardado. Después de deshacer debes guardar para conservar el resultado.
+
+## Estados de producción
+
+El número de parte permanece en la cabecera de operación, con un resultado OK/NG grande. La fase se muestra por separado: **ESPERANDO PIEZA**, **MANTENGA LA PIEZA FIJA**, **EVALUANDO**, **RETIRE LA PIEZA**, **PAUSADA** o **SIN CÁMARA**. El resultado emitido se conserva durante la espera de retiro; no se crea otra inspección por mostrarlo.
+
+Las zonas muestran barras y mensajes como **Diferencia 48 / límite 30 px**, con la explicación de si exceden el límite. El área corresponde al mayor defecto conectado que calcula el motor; las barras no cambian los umbrales. Las mediciones y la referencia tienen desplazamiento para mantener los controles principales accesibles con cinco zonas.
 
 ## Cámara
 
@@ -112,7 +146,7 @@ La carpeta de datos está excluida de Git. Para respaldar todo, cierra el progra
 
 ## Verificación y límites
 
-Esta versión pasó **81 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores, diagnósticos por foto, compatibilidad del historial anterior, pruebas en vivo sin habilitación y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. Las pruebas de distribución comprueban límites y acceso a botones a **1000 × 680, 1280 × 720 y 1440 × 900**, barras con varias filas y escalado de controles al 125 %. No se verificó una cámara física ni su controlador de Windows.
+Esta versión pasó **96 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores, diagnósticos por foto, comparación con el patrón OK, guía de preparación, controles numéricos, deshacer fotos sin perder otros ajustes, estados de producción, compatibilidad del historial anterior, pruebas en vivo sin habilitación y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. Las pruebas de distribución comprueban límites y acceso a botones a **1000 × 680, 1280 × 720 y 1440 × 900**, barras con varias filas y escalado de controles al 125 %. No se verificó una cámara física ni su controlador de Windows.
 
 Comprueba en tu equipo enfoque, iluminación, resolución, velocidad y resultados con piezas reales. La presencia y el retiro se estiman visualmente; no hay un sensor físico de presencia. El motor indica diferencias por zona, sin diagnosticar automáticamente el tipo de defecto.
 

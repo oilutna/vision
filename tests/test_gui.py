@@ -529,7 +529,7 @@ class GuiTests(unittest.TestCase):
             for bar in (w for w in validation.winfo_children() if isinstance(w,ActionBar)):
                 for widget in bar.actions:self.assert_control_visible(widget)
             self.app.control_tabs.select('Cámara');self.pump(.1)
-            camera=self.app.control_tabs.pages[1][0].inner
+            camera=next(w for w,title in self.app.control_tabs.pages if title=='Cámara').inner
             for bar in (w for w in camera.winfo_children() if isinstance(w,ActionBar)):
                 for widget in bar.actions:self.assert_control_visible(widget)
             self.app.control_tabs.select('Zonas')
@@ -573,6 +573,132 @@ class GuiTests(unittest.TestCase):
                 self.assert_control_visible(widget)
         finally:
             ctk.set_widget_scaling(1.0);self.pump(.1)
+
+    def test_preparation_guide_tracks_photos_validation_and_unsaved_changes(self):
+        self.admin();m=self.model_in_editor()
+        self.app._update_preparation()
+        self.assertTrue(all(done for done,_ in self.app.guide_steps[:4]))
+        self.assertFalse(self.app.guide_steps[4][0])
+        self.app.guide_to(4)
+        self.assertEqual(self.app.editor_tabs.select(),str(self.app.sample_galleries['NG']['page']))
+        self.app.guide_to(2)
+        self.assertEqual(self.app.control_tabs.select(),str(next(w for w,title in self.app.control_tabs.pages if title=='Zonas')))
+        m=add_samples(self.app.store,m,truths=('NG',))
+        self.app._load_editor(m)
+        self.app.run_validation();self.wait_idle();self.pump(.15)
+        self.assertTrue(all(done for done,_ in self.app.guide_steps))
+        self.assertIsNone(self.app.store.read(m['id'])['validation'])
+        self.app.zone_scales['1'].set(23);self.pump(.1)
+        self.assertFalse(self.app.guide_steps[5][0])
+        self.assertIn('Guarda',self.app.guide_rows[5][1].cget('text'))
+
+    def test_numeric_zone_controls_sync_step_validate_and_persist(self):
+        self.admin();m=self.model_in_editor()
+        factor=self.app.zone_fields['1'][1]
+        factor.set('1');self.app._step_zone('1',1)
+        self.assertEqual(factor.get(),'2')
+        self.app._step_zone('1',-1);self.app._step_zone('1',-1)
+        self.assertEqual(factor.get(),'1')
+        factor.set('301')
+        self.assertTrue(self.app.zone_inputs['1'].instate(['invalid']))
+        with self.assertRaises(ValueError):self.app._sync()
+        self.app.zone_scales['1'].set(17)
+        self.assertEqual(factor.get(),'17')
+        self.assertFalse(self.app.zone_inputs['1'].instate(['invalid']))
+        self.app.save_model()
+        self.assertEqual(self.app.store.read(m['id'])['config']['zones']['1']['factor'],17)
+        self.assertTrue(self.app.zone_inputs['4'].instate(['disabled']))
+        self.assertTrue(self.app.zone_steps['4'][0].instate(['disabled']))
+
+    def test_undo_capture_keeps_subsequent_settings_and_other_photo_notes(self):
+        self.admin();m=self.model_in_editor()
+        self.camera.frame=images()[2]
+        self.app.capture_sample('NG')
+        self.app.zone_fields['1'][1].set('17')
+        self.app.photo_fields['reference']['variables']['note'].set('Nota posterior de otra foto')
+        self.app.undo_photo()
+        self.assertEqual(self.app.draft['samples'],[])
+        self.assertEqual(self.app.draft['zones']['1']['factor'],17)
+        self.assertEqual(self.app.draft['references'][0]['note'],'Nota posterior de otra foto')
+        self.assertTrue(self.app.dirty)
+        self.assertTrue(self.app.undo_buttons['NG'].instate(['disabled']))
+        self.assertEqual(self.app.store.read(m['id'])['config']['samples'],[])
+
+    def test_undo_deleted_ng_and_replaced_ok_then_clear_on_save(self):
+        self.admin();m=self.model_in_editor()
+        self.camera.frame=images()[2]
+        entry=self.app.capture_sample('NG');self.app.save_model()
+        self.assertEqual(self.app.photo_undo.actions,[])
+        with patch('poka_yoke_mejorado5.messagebox.askyesno',return_value=True):self.app.remove_sample('NG')
+        self.assertEqual(self.app.draft['samples'],[])
+        self.app.undo_photo()
+        self.assertEqual(self.app.draft['samples'][0]['id'],entry['id'])
+        previous=copy.deepcopy(self.app.draft['references'][0])
+        base=copy.deepcopy(self.app.draft['base_image'])
+        self.app.gallery_slot=0
+        with patch('poka_yoke_mejorado5.messagebox.askyesno',return_value=True):self.app.retake_reference()
+        self.assertNotEqual(self.app.draft['references'][0]['path'],previous['path'])
+        self.app.undo_photo()
+        self.assertEqual(self.app.draft['references'][0],previous)
+        self.assertEqual(self.app.draft['base_image'],base)
+        self.app.save_model()
+        self.assertEqual(self.app.photo_undo.actions,[])
+        self.app._load_editor(self.app.store.create('OTRA-PIEZA'))
+        self.assertEqual(self.app.photo_undo.actions,[])
+
+    def test_failed_or_cancelled_photo_actions_do_not_replace_last_undo(self):
+        self.admin();self.model_in_editor()
+        self.camera.frame=images()[2]
+        self.app.capture_sample('NG')
+        self.assertEqual(len(self.app.photo_undo.actions),1)
+        with self.assertRaises(ValueError):self.app.capture_sample('NG')
+        self.camera.frame=images()[2].copy();self.camera.frame[0,0]=[101,102,103]
+        with patch('poka_yoke_mejorado5.messagebox.askyesno',return_value=False):
+            self.app.retake_sample('NG')
+            self.app.remove_sample('NG')
+        self.assertEqual(len(self.app.photo_undo.actions),1)
+        self.app.undo_photo()
+        self.assertEqual(self.app.draft['samples'],[])
+
+    def test_comparison_dialog_shows_real_mismatch_without_approving_or_counting(self):
+        self.admin();m=self.model_in_editor()
+        m=add_samples(self.app.store,m,truths=('NG',))
+        c=copy.deepcopy(m['config'])
+        good=images()[1].copy();good[0,0]=[111,112,113]
+        c['samples'][0].update(self.app.store.put_image(m['id'],good))
+        m=self.app.store.save(m['id'],c)
+        self.app._load_editor(m)
+        self.app._select_sample(c['samples'][0]['id'])
+        self.app.compare_photo('NG');self.wait_idle();self.pump(.15)
+        dialog=next(w for w in self.root.winfo_children() if isinstance(w,ctk.CTkToplevel))
+        self.assertTrue(dialog.comparison['result']['ok'])
+        self.assertEqual(dialog.comparison['entry']['truth'],'NG')
+        left,right=dialog.comparison_canvases
+        self.assertEqual(left.source.shape,right.source.shape)
+        self.assertEqual(self.app.store.events(model_id=m['id']),[])
+        self.assertIsNone(self.app.store.read(m['id'])['validation'])
+        dialog.destroy()
+
+    def test_guide_buttons_and_precise_zone_controls_fit_small_window(self):
+        self.admin();self.model_in_editor()
+        self.root.geometry('1000x680')
+        self.app.control_tabs.select('Guía');self.pump(.15)
+        for _,_,widget in self.app.guide_rows:self.assert_control_visible(widget)
+        self.assert_control_visible(self.app.guide_next_button)
+        self.app.control_tabs.select('Zonas');self.pump(.15)
+        for widget in (self.app.zone_scales['1'],self.app.zone_inputs['1'],*self.app.zone_steps['1']):
+            self.assert_control_visible(widget)
+
+    def test_production_exposes_retirement_phase_and_zone_values_without_new_events(self):
+        from tests.helpers import dummy_result
+        self.app.running=True
+        self.app._display_output(dict(annotated=images()[1],state='Resultado emitido · esperando retiro',
+                                      result=dummy_result(False),match=.99))
+        self.app.running=False
+        self.assertEqual(self.app.phase_label.cget('text'),'RETIRE LA PIEZA')
+        self.assertEqual(self.app.result_label.cget('text'),'NG')
+        self.assertIn('Diferencia 100 / límite 6',self.app.zone_readout.rows[0][2].cget('text'))
+        self.assertEqual(self.app.store.events(),[])
 
     def test_history_can_open_original_and_export_filtered_records(self):
         m=make_model(self.app.store)
