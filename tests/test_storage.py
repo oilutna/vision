@@ -21,10 +21,12 @@ class StorageTests(unittest.TestCase):
         a=make_model(self.store,'A')
         b=self.store.create('B')
         c=copy.deepcopy(a['config']);c['brightness']=37;c['zones']['1']['factor']=175
+        c['zones']['2']['factor']=10
         a=self.store.save(a['id'],c)
         reopened=Store(self.temp.name)
         self.assertEqual(reopened.read(a['id'])['config']['brightness'],37)
         self.assertEqual(reopened.read(a['id'])['config']['zones']['1']['factor'],175)
+        self.assertEqual(reopened.read(a['id'])['config']['zones']['2']['factor'],10)
         self.assertEqual(reopened.read(b['id'])['config']['brightness'],0)
         self.assertEqual(reopened.read(b['id'])['config']['zones']['1']['factor'],100)
 

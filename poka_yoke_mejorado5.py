@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Poka-Yoke 5.3.0 — archivo único: Administración e Inspección.
+"""Poka-Yoke 5.3.1 — archivo único: Administración e Inspección.
 
 Ejecutar: python poka_yoke_mejorado5.py
 Dependencias: python -m pip install numpy opencv-python Pillow
@@ -168,7 +168,7 @@ def validate_config(c, complete=False):
         z = c['zones'].get(str(i), {})
         if not isinstance(z.get('name'), str) or not z['name'].strip() or len(z['name']) > 80:
             raise ValueError(f'Falta un nombre válido para la zona {i}.')
-        number(z.get('factor'), 50, 300, f'Límite de zona {i}', True)
+        number(z.get('factor'), 1, 300, f'Límite de zona {i}', True)
         rect = z.get('rect')
         if rect is not None:
             if not isinstance(rect, list) or len(rect) != 4:
@@ -1872,7 +1872,7 @@ class Application:
             ttk.Label(row,text='Umbral de zona:').pack(side='left')
             value = tk.StringVar(value='100 %')
             ttk.Label(row,textvariable=value,style='Accent.TLabel').pack(side='right')
-            scale = ttk.Scale(box,from_=50,to=300,orient='horizontal',
+            scale = ttk.Scale(box,from_=1,to=300,orient='horizontal',
                               command=lambda v,key=str(i):self._zone_scale_moved(key,v))
             scale.pack(fill='x',pady=(0,4))
             button(box,'Dibujar / editar zona',lambda idx=i:self.edit_zone(idx))
@@ -2255,7 +2255,7 @@ class Application:
     def _zone_scale_moved(self,key,value):
         if self._updating_zone_scale:
             return
-        factor = max(50,min(300,int(round(float(value)))))
+        factor = max(1,min(300,int(round(float(value)))))
         self._updating_zone_scale = True
         try:
             self.zone_fields[key][1].set(str(factor))
@@ -3567,7 +3567,7 @@ def main():
     parser = argparse.ArgumentParser(description='Poka-Yoke 5 · Administración e inspección local')
     parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parent/'datos',
                         help='Ubicación de modelos, contraseña y registros; por defecto datos junto al programa')
-    parser.add_argument('--version',action='version',version='Poka-Yoke 5.3.0')
+    parser.add_argument('--version',action='version',version='Poka-Yoke 5.3.1')
     args = parser.parse_args()
     try:
         import tkinter as tk

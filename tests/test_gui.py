@@ -140,14 +140,15 @@ class GuiTests(unittest.TestCase):
         from tkinter import ttk
         self.assertIsInstance(self.app.zone_scales['1'],ttk.Scale)
         self.app.zone_scales['1'].set(200.7)
-        self.app.zone_scales['2'].set(75)
+        self.app.zone_scales['2'].set(1)
         self.assertEqual(self.app.zone_values['1'].get(),'201 %')
         self.assertEqual(self.app.zone_fields['1'][1].get(),'201')
+        self.assertEqual(self.app.zone_values['2'].get(),'1 %')
         self.assertEqual(self.app.store.read(m['id'])['config']['zones']['1']['factor'],100)
         self.app.save_model()
         saved=self.app.store.read(m['id'])
         self.assertEqual(saved['config']['zones']['1']['factor'],201)
-        self.assertEqual(saved['config']['zones']['2']['factor'],75)
+        self.assertEqual(saved['config']['zones']['2']['factor'],1)
         self.assertAlmostEqual(self.app.zone_scales['1'].get(),201)
         self.assertFalse(self.app.dirty)
         other=self.app.store.create('OTRO-NUMERO')
@@ -155,6 +156,7 @@ class GuiTests(unittest.TestCase):
         self.assertAlmostEqual(self.app.zone_scales['1'].get(),100)
         self.app._load_editor(saved)
         self.assertAlmostEqual(self.app.zone_scales['1'].get(),201)
+        self.assertAlmostEqual(self.app.zone_scales['2'].get(),1)
 
     def test_zone_sliders_follow_three_or_five_zone_selection(self):
         self.admin();self.model_in_editor()

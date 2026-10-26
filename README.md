@@ -1,6 +1,6 @@
 # Poka-Yoke 5
 
-Versión **5.3.0**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.3.1**. Aplicación local de inspección visual para ensambles, con Administración e Inspección separadas. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
 
 ## Ejecutar
 
@@ -35,7 +35,7 @@ Una vez completas las diez fotos de cada clase, utiliza **Repetir seleccionada**
 
 ## Umbral por zona con deslizadores
 
-Cada zona tiene un deslizador y su valor visible. El rango es de **50 % a 300 % de la calibración automática**; conserva el significado de los límites de versiones anteriores. Un porcentaje mayor permite diferencias mayores. Las zonas 4 y 5 quedan desactivadas cuando seleccionas el modo de tres zonas.
+Cada zona tiene un deslizador y su valor visible. El rango es de **1 % a 300 % de la calibración automática**; conserva el significado de los límites de versiones anteriores. Un porcentaje menor aumenta la sensibilidad; uno mayor permite diferencias mayores. El límite calculado conserva un mínimo de 6 píxeles de área del defecto; el deslizador no cambia los umbrales de diferencia de color por píxel. Las zonas 4 y 5 quedan desactivadas cuando seleccionas el modo de tres zonas.
 
 Los ajustes son temporales hasta pulsar **Guardar configuración**. Al volver a seleccionar ese número de parte se recuperan sus valores, sin mezclarlos con los de otro modelo. **Restaurar guardada** descarta el borrador; **Recuperar versión anterior** recupera ajustes e imágenes anteriores como otra versión pendiente de comprobar.
 
