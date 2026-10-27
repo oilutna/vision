@@ -96,8 +96,8 @@ def defaults():
 
 def canonical(config):
     # No references to mutable image filenames: image assets are addressed by SHA256.
-    return hashlib.sha256(json.dumps(config, sort_keys=True, allow_nan=False,
-                                    separators=(',', ':')).encode()).hexdigest()
+    return hashlib.sha256(('complete-reference-engine-1:' + json.dumps(config, sort_keys=True, allow_nan=False,
+                                    separators=(',', ':'))).encode()).hexdigest()
 
 
 def reference_samples(config):
@@ -1001,7 +1001,7 @@ class OriginalVision:
         El criterio es el área del defecto mayor (blob), no la suma de píxeles."""
         ancho_obj, alto_obj = cache["ancho"], cache["alto"]
         roi_u8 = np.clip(roi_f, 0, 255).astype(np.uint8)
-        media_f, media_u8, umbral = cache["media_f"], cache["media_u8"], cache["umbral"]
+        media_f, media_u8, umbral = cache["media_f"], cache.get("evaluation_u8",cache["media_u8"]), cache["umbral"]
         lim_cal = cache.get("lim_zona", {})
         frac = tolerancia / FACTOR_TOLERANCIA
 
@@ -1092,19 +1092,36 @@ class VisionEngine(OriginalVision):
         if bad:
             raise ReferencePreparationError('No se pudieron alinear estas referencias OK: '+', '.join(map(str, bad))+'. Reemplázalas.',
                 {f'reference:{i-1}':'Esta foto OK no se alinea con la primera referencia. Revisa posición, orientación y enfoque.' for i in bad})
-        stack = np.stack([cv2.GaussianBlur(cv2.cvtColor(r, cv2.COLOR_BGR2LAB), (5, 5), 0).astype(np.float32) for r in aligned])
-        mean = stack.mean(axis=0)
-        u8 = np.clip(mean, 0, 255).astype(np.uint8)
-        gray = cv2.cvtColor(cv2.cvtColor(u8, cv2.COLOR_LAB2BGR), cv2.COLOR_BGR2GRAY)
-        cache = dict(ancho=w, alto=h, media_f=mean, media_u8=u8, media_L=u8[...,0].copy(),
-                     umbral=self._umbral_pixel(stack.std(axis=0)), tpl_gray=gray,
-                     tpl_gray_s=cv2.resize(gray, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA),
-                     L_mean=float(mean[...,0].mean()), L_std=float(mean[...,0].std()),
-                     a_med=float(np.median(mean[...,1])), b_med=float(np.median(mean[...,2])),
-                     a_std=float(mean[...,1].std()), b_std=float(mean[...,2].std()))
-        cache['lim_zona'] = self._calibrar_limites(stack, cache, c['zone_count'])
-        self.cache = cache
-        self.aligned_references = len(aligned)
+        # Keep a real representative (medoid), never a per-pixel blend of variants.
+        labs = [cv2.cvtColor(r, cv2.COLOR_BGR2LAB) for r in aligned]
+        smooth = [cv2.GaussianBlur(a,(5,5),0).astype(np.float32) for a in labs]
+        distances = np.array([[float(np.mean(np.abs(a-b))) for b in smooth] for a in smooth])
+        centrality = distances.mean(axis=1)
+        eligible = np.flatnonzero(centrality <= centrality.min()+1e-6)
+        representative = int(max(eligible,key=lambda i:cv2.Laplacian(labs[i][...,0],cv2.CV_64F).var()))
+        self.reference_caches=[]
+        for i,(image,lab,measurement) in enumerate(zip(aligned,labs,smooth)):
+            gray = cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
+            if gray.std()<1:
+                raise ReferencePreparationError('Una referencia no tiene textura suficiente.',
+                    {f'reference:{i}':'Repite esta foto OK con textura y enfoque suficientes.'})
+            # Variation BETWEEN accepted variants must never increase defect tolerance.
+            cache=dict(ancho=w,alto=h,media_f=measurement,media_u8=lab,
+                       evaluation_u8=measurement.astype(np.uint8),media_L=measurement[...,0].copy(),
+                       umbral=self._umbral_pixel(np.zeros_like(measurement)),
+                       tpl_gray=gray,tpl_gray_s=cv2.resize(gray,None,fx=.5,fy=.5,interpolation=cv2.INTER_AREA),
+                       L_mean=float(measurement[...,0].mean()),L_std=float(measurement[...,0].std()),
+                       a_med=float(np.median(measurement[...,1])),b_med=float(np.median(measurement[...,2])),
+                       a_std=float(measurement[...,1].std()),b_std=float(measurement[...,2].std()),
+                       lim_zona={str(z):CAL_MIN_BLOB for z in range(1,c['zone_count']+1)},
+                       reference_index=i,reference_bgr=image.copy())
+            self.reference_caches.append(cache)
+        self.representative_index=representative
+        self.pattern_cache=self.reference_caches[representative]
+        self.cache=self.pattern_cache
+        self.aligned_references=len(aligned)
+        self._candidates=[]
+        self._last_alignment_valid=False
 
     def adjust(self, frame):
         return cv2.convertScaleAbs(frame, alpha=self.config['contrast']/100., beta=self.config['brightness'])
@@ -1139,35 +1156,76 @@ class VisionEngine(OriginalVision):
         return float(score), x0+loc[0], y0+loc[1]
 
     def locate(self, adjusted):
-        h, w = adjusted.shape[:2]
-        return self._localizar(cv2.cvtColor(adjusted, cv2.COLOR_BGR2GRAY), self.cache, h, w)
+        h,w=adjusted.shape[:2]
+        gray=cv2.cvtColor(adjusted,cv2.COLOR_BGR2GRAY)
+        matches=[(self._localizar(gray,cache,h,w),cache) for cache in self.reference_caches]
+        best,cache=max(matches,key=lambda pair:pair[0][0])
+        score,x,y=best
+        # Compare complete references only at the location of this same object.
+        self._candidates=[(m[0],c) for m,c in matches
+                          if m[0]>=MATCH_PRESENCIA and abs(m[1]-x)<=TOL_POS and abs(m[2]-y)<=TOL_POS]
+        self.cache=cache
+        return best
+
+    def _roi_alineada(self, frame, tx, ty, cache):
+        aw,ah=cache['ancho'],cache['alto']
+        patch=frame[ty:ty+ah,tx:tx+aw]
+        self._last_alignment_valid=False
+        if patch.shape[:2]!=(ah,aw): return None
+        # Do not normalize to one variant before testing all the others.
+        lab=cv2.GaussianBlur(cv2.cvtColor(patch,cv2.COLOR_BGR2LAB),(5,5),0).astype(np.float32)
+        self._last_alignment_valid=True
+        return lab
 
     def evaluate_roi(self, roi, match):
-        result = self._evaluar_zonas(roi, self.cache, self.config['zone_count'], self.config['tolerance'], match)
-        for z in result['zonas']:
-            z['name'] = self.config['zones'][str(z['idx'])]['name']
-        result['adjustment'] = self._ultimo_ajuste
+        if not self._last_alignment_valid or not np.isfinite(roi).all():
+            return None
+        candidates=self._candidates or [(match,c) for c in self.reference_caches]
+        results=[]
+        for score,cache in candidates:
+            matrix=self._alinear_a(cache['media_L'],roi[...,0])
+            if matrix is None or not np.isfinite(matrix).all(): continue
+            angle=float(np.degrees(np.arctan2(matrix[1,0],matrix[0,0])))
+            if abs(angle)>ECC_ROT_MAX or np.max(np.abs(matrix[:,2]))>ECC_DESP_MAX: continue
+            aligned=cv2.warpAffine(roi,matrix,(cache['ancho'],cache['alto']),
+                                   flags=cv2.INTER_LINEAR,borderMode=cv2.BORDER_REPLICATE)
+            normalized=self._normalizar_iluminacion(aligned,cache)
+            result=self._evaluar_zonas(normalized,cache,self.config['zone_count'],self.config['tolerance'],score)
+            if result is None: continue
+            for z in result['zonas']: z['name']=self.config['zones'][str(z['idx'])]['name']
+            result['adjustment']=(angle,float(matrix[0,2]),float(matrix[1,2]))
+            result['reference_index']=cache['reference_index']
+            result['reference_path']=self.config['references'][cache['reference_index']]['path']
+            result['engine']='complete-reference-engine-1'
+            penalty=max(z['pix']/max(1,z['lim']) for z in result['zonas'])
+            results.append((not result['ok'],penalty,-score,cache,result,normalized))
+        if not results: return None
+        _,_,_,cache,result,normalized=min(results,key=lambda item:item[:3])
+        self.cache=cache; self._ultimo_ajuste=result['adjustment']
+        self.last_comparison_roi=normalized
         return result
 
     def evaluate_sample(self, image, entry):
-        adjusted = image if entry.get('processed') else self.adjust(image)
-        if entry['kind'] == 'crop':
-            if adjusted.shape[:2] != (self.cache['alto'], self.cache['ancho']):
+        self._candidates=[]
+        adjusted=image if entry.get('processed') else self.adjust(image)
+        if entry['kind']=='crop':
+            if adjusted.shape[:2]!=(self.cache['alto'],self.cache['ancho']):
                 raise ValueError('La muestra recortada tiene dimensiones incompatibles.')
-            # A crop is a labelled specimen ROI; use measured correlation, never a fabricated match.
-            gray = cv2.cvtColor(adjusted, cv2.COLOR_BGR2GRAY)
-            score = float(cv2.matchTemplate(gray, self.cache['tpl_gray'], cv2.TM_CCOEFF_NORMED)[0,0])
-            x, y = 0, 0
+            gray=cv2.cvtColor(adjusted,cv2.COLOR_BGR2GRAY)
+            self._candidates=[(float(cv2.matchTemplate(gray,c['tpl_gray'],cv2.TM_CCOEFF_NORMED)[0,0]),c)
+                              for c in self.reference_caches]
+            self._candidates=[(score,c) for score,c in self._candidates if np.isfinite(score) and score>=MATCH_PRESENCIA]
+            score=max((m for m,c in self._candidates),default=0.)
+            x,y=0,0
         else:
-            self.check_frame(image)
-            score, x, y = self.locate(adjusted)
-        if not np.isfinite(score) or score < MATCH_PRESENCIA:
-            return None, adjusted.copy(), 'Sin coincidencia suficiente: muestra sin evaluación.'
-        roi = self._roi_alineada(adjusted, x, y, self.cache)
-        if roi is None:
-            return None, adjusted.copy(), 'Región fuera de límites.'
-        result = self.evaluate_roi(roi, score)
-        return result, self.annotate(adjusted, result, x, y), ''
+            self.check_frame(image); score,x,y=self.locate(adjusted)
+        if not np.isfinite(score) or score<MATCH_PRESENCIA:
+            return None,adjusted.copy(),'Sin coincidencia suficiente: muestra sin evaluación.'
+        roi=self._roi_alineada(adjusted,x,y,self.cache)
+        if roi is None: return None,adjusted.copy(),'Región fuera de límites.'
+        result=self.evaluate_roi(roi,score)
+        note='' if result is not None else 'Sin evaluación: no se obtuvo una alineación confiable.'
+        return result,self.annotate(adjusted,result,x,y),note
 
     def annotate(self, frame, result, x, y):
         out = frame.copy()
@@ -1192,6 +1250,7 @@ class InspectionCycle:
 
     def interrupt(self):
         self.previous = None
+        self._decision_signature = None
         self.stable = 0
         self.accum = None
         self.count = 0
@@ -1241,6 +1300,17 @@ class InspectionCycle:
             self.interrupt()
             output['state'] = 'Sin evaluación · región fuera de límites'
             return output
+        # A changing component must not disappear into an eight-frame average.
+        current=e.evaluate_roi(roi,score)
+        if current is None:
+            self.interrupt()
+            output['state']='Sin evaluación · alineación insuficiente'
+            return output
+        signature=(current['ok'],current.get('reference_index'),
+                   tuple(z['ok'] for z in current['zonas']))
+        if self._decision_signature != signature:
+            self.accum,self.count=None,0
+        self._decision_signature=signature
         if self.accum is None:
             self.accum = np.zeros_like(roi, dtype=np.float32)
         self.accum += roi
@@ -1249,6 +1319,14 @@ class InspectionCycle:
             output['state'] = f'Evaluando {self.count}/{FRAMES_PROMEDIO}'
             return output
         result = e.evaluate_roi(self.accum/self.count, score)
+        if result is not None and (result['ok'],result.get('reference_index'),tuple(z['ok'] for z in result['zonas']))!=signature:
+            self.accum,self.count=None,0
+            output['state']='Estabilizando · cambió la comparación de pieza'
+            return output
+        if result is None:
+            self.interrupt()
+            output['state']='Sin evaluación · alineación insuficiente'
+            return output
         self.result, self.latched = result, True
         output.update(state='Resultado emitido · esperando retiro', result=result,
                       event=result, annotated=e.annotate(adjusted,result,x,y))
@@ -1862,16 +1940,18 @@ def build_photo_comparison(store,model,entry):
     except (ValueError,OSError,cv2.error) as error:
         packet['note'] = 'Sin evaluación: '+str(error)
         return packet
-    packet['reference'] = cv2.cvtColor(engine.cache['media_u8'],cv2.COLOR_LAB2BGR)
-    packet['reference_title'] = 'Patrón de las 10 OK'
+    packet['reference'] = engine.pattern_cache['reference_bgr'].copy()
+    packet['reference_title'] = f'OK {engine.representative_index+1} · referencia real representativa'
     result,_,note = engine.evaluate_sample(image,entry)
     packet.update(result=result,note=note)
     if result is None:
         packet['sample_title'] = 'Foto sin localizar · sin evaluación'
         return packet
+    packet['reference'] = engine.cache['reference_bgr'].copy()
+    packet['reference_title'] = f'OK {result["reference_index"]+1} · referencia completa comparada'
     adjusted = image if entry.get('processed') else engine.adjust(image)
     _,x,y = engine.locate(adjusted) if entry['kind'] != 'crop' else (0,0,0)
-    roi = engine._roi_alineada(adjusted,x,y,engine.cache)
+    roi = engine.last_comparison_roi
     packet['sample'] = cv2.cvtColor(np.clip(roi,0,255).astype(np.uint8),cv2.COLOR_LAB2BGR)
     packet['sample_title'] = 'Foto seleccionada · alineada y normalizada'
     packet['zones'] = result['zonas']
@@ -4309,3 +4389,4 @@ def main():
 
 if __name__ == '__main__':
     raise SystemExit(main())
+

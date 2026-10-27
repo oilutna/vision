@@ -1,6 +1,16 @@
 # Poka-Yoke 5
 
-Versión **5.5.1**. Aplicación local de inspección visual para ensambles, con interfaz industrial oscura en **CustomTkinter** y modos de Administración e Inspección separados. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.5.1**. Aplicación local de inspección visual para ensambles, con interfaz industrial oscura en **CustomTkinter** y modos de Administración e Inspección separados. El motor de comparación incorpora referencias completas independientes; consulta la sección siguiente. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+
+## Motor: referencia real y versiones completas
+
+El patrón visible se elige como una fotografía OK real alineada y representativa de las diez (medoide); no se fusionan variantes mediante una media por píxel. Para aceptar una pieza, todas las zonas deben aprobar contra **la misma referencia completa**. La ventana Comparar OK muestra qué OK se utilizó realmente. La variación entre versiones no ensancha automáticamente los umbrales por píxel.
+
+Si cambia la referencia o la decisión de una zona durante la acumulación temporal, se reinicia esa acumulación. Una alineación insuficiente produce sin evaluación. Las pantallas, cámara, usuarios y almacenamiento se conservan.
+
+**Actualización:** conserva la carpeta `datos` y sustituye el Python. Las aprobaciones anteriores quedan pendientes por el cambio de motor; repite Comprobar 10 OK + 10 NG y Habilitar inspección. No necesitas recapturar imágenes utilizables. Revisa de nuevo sensibilidad y defectos mínimos detectables con piezas físicas. El software no recupera detalles ausentes en fotografías borrosas.
+
+Validación de esta corrección: 8 regresiones nuevas y 26 pruebas originales enfocadas aprobadas; no se declara nuevamente aprobada la suite gráfica completa. Las mediciones de rendimiento publicadas para el motor anterior no caracterizan esta nueva comparación con múltiples referencias. [Detalles del motor y límites](docs/motor_referencias_completas.md).
 
 ## Ejecutar
 
@@ -47,7 +57,7 @@ La guía se actualiza al capturar, editar o comprobar. Los cambios sin guardar d
 
 ## Comparar una foto con las OK
 
-Selecciona una miniatura y pulsa **Comparar OK**. La ventana muestra el patrón formado con las mismas diez OK y la región evaluada de la foto seleccionada, alineada y normalizada como la ve el motor. La cabecera distingue la etiqueta indicada por el administrador del resultado calculado: una foto NG aceptada aparece como **NG PASA COMO OK**.
+Selecciona una miniatura y pulsa **Comparar OK**. La ventana muestra la referencia completa seleccionada entre las mismas diez OK y la región evaluada de la foto seleccionada, alineada y normalizada como la ve el motor. La cabecera distingue la etiqueta indicada por el administrador del resultado calculado: una foto NG aceptada aparece como **NG PASA COMO OK**.
 
 Las zonas tienen contornos verdes o rojos. Se resalta primero la zona que falla; **Todas las zonas** y **Z1**, **Z2**, etc. permiten cambiar el resaltado. Las mediciones y barras muestran el área de diferencia, su límite y cuánto lo supera. Si no hay coincidencia suficiente, se conserva la foto completa y se indica **SIN EVALUACIÓN**. Si faltan referencias utilizables, se puede ver una OK disponible sin inventar un resultado.
 
@@ -111,7 +121,7 @@ Usa el mismo ID si varias fotos corresponden a la misma pieza física. **Aplicar
 
 ## Cómo interpretar la comprobación
 
-Las diez OK se utilizan para construir el patrón y después se comprueban contra ese mismo patrón. Su resultado se muestra como **comprobación de referencia OK**, separado del resultado de las NG. **No es una validación independiente ni mide el desempeño con piezas nuevas.**
+Las diez OK forman el banco de referencias completas y después se comprueban contra ese mismo banco. Su resultado se muestra como **comprobación de referencia OK**, separado del resultado de las NG. **No es una validación independiente ni mide el desempeño con piezas nuevas.**
 
 Para habilitar una versión se requieren diez OK comprobadas y diez NG comprobadas, sin rechazos de las OK, aceptaciones de las NG ni fotografías sin evaluación. Una NG que no se puede localizar queda sin evaluación; no cuenta como defecto detectado. La aprobación y los resultados pertenecen a la versión exacta guardada.
 
