@@ -55,7 +55,8 @@ class GuiTests(unittest.TestCase):
         while time.monotonic()<deadline:
             self.root.update()
             time.sleep(.01)
-    def wait_idle(self,timeout=5):
+    def wait_idle(self,timeout=10):
+        # Incluye lotes de 20 fotos y escritura a disco; no mide la latencia del ciclo.
         deadline=time.monotonic()+timeout
         while self.app.task is not None and time.monotonic()<deadline:
             self.pump(.04)
@@ -699,6 +700,103 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.app.result_label.cget('text'),'NG')
         self.assertIn('Diferencia 100 / límite 6',self.app.zone_readout.rows[0][2].cget('text'))
         self.assertEqual(self.app.store.events(),[])
+
+    def start_performance_model(self):
+        m=record_validation(self.app.store,add_samples(self.app.store,make_model(self.app.store)))
+        self.app._refresh_catalog();self.app.op_part.set(m['part']);self.app._select_operation()
+        self.app.operator.set('Prueba rendimiento');self.app.lot.set('PERF')
+        self.app.start_or_pause();self.pump(.6)
+        self.assertTrue(self.app.running)
+        return m
+
+    def test_production_frames_do_not_reconfigure_the_admin_panel(self):
+        self.start_performance_model()
+        self.camera.frame=images()[1]
+        with patch.object(self.app,'_set_admin_editable',wraps=self.app._set_admin_editable) as changes:
+            self.pump(.8)
+            changes.assert_not_called()
+        self.app.pause();self.wait_idle()
+
+    def test_camera_and_decision_stay_responsive_while_record_is_saving(self):
+        import threading
+        m=self.start_performance_model()
+        entered,release=threading.Event(),threading.Event()
+        original=self.app.store.record
+        def slow_record(*args,**kw):
+            entered.set();release.wait(3)
+            return original(*args,**kw)
+        with patch.object(self.app.store,'record',side_effect=slow_record):
+            try:
+                self.camera.frame=images()[1]
+                deadline=time.monotonic()+3
+                while not entered.is_set() and time.monotonic()<deadline:self.pump(.02)
+                self.assertTrue(entered.is_set())
+                self.pump(.06)
+                self.assertEqual(self.app.result_label.cget('text'),'OK')
+                self.assertEqual(self.app.store.counts(m['id'],'PERF'),(0,0))
+                self.assertIn('guardando',self.app.message.get())
+                newer=images()[1].copy();newer[0,0]=[77,88,99]
+                self.camera.frame=newer;self.pump(.25)
+                self.assertTrue(np.array_equal(self.app.video.source[0,0],newer[0,0]))
+                with patch('poka_yoke_mejorado5.messagebox.showinfo'):
+                    self.app.close()
+                self.assertFalse(self.app.closed)
+            finally:
+                release.set();self.app.pause();self.wait_idle()
+        self.assertEqual(self.app.store.counts(m['id'],'PERF'),(1,0))
+        self.assertEqual(len(self.app.store.events(model_id=m['id'],kind='production')),1)
+
+    def test_camera_preview_updates_while_the_engine_is_busy(self):
+        import threading
+        self.start_performance_model()
+        entered,release=threading.Event(),threading.Event()
+        original=self.app.cycle.process
+        def slow_process(*args,**kw):
+            entered.set();release.wait(3)
+            return original(*args,**kw)
+        with patch.object(self.app.cycle,'process',side_effect=slow_process):
+            try:
+                deadline=time.monotonic()+2
+                while not entered.is_set() and time.monotonic()<deadline:self.pump(.02)
+                self.assertTrue(entered.is_set())
+                self.camera.frame=images()[1]
+                self.pump(.25)
+                self.assertTrue(np.array_equal(self.app.video.source,self.camera.frame))
+                self.assertEqual(self.app.result_label.cget('text'),'SIN EVALUACIÓN')
+            finally:
+                release.set();self.app.pause();self.wait_idle()
+
+    def test_video_preview_resizes_only_the_display_and_reuses_canvas_item(self):
+        import cv2
+        from poka_yoke_mejorado5 import ImageCanvas
+        canvas=ImageCanvas(self.root,width=320,height=180,video=True)
+        canvas.place(x=10,y=100,width=320,height=180);self.pump(.1)
+        frame=np.full((1080,1920,3),42,np.uint8)
+        with patch('poka_yoke_mejorado5.cv2.cvtColor',wraps=cv2.cvtColor) as conversion:
+            canvas.display(frame,copy_image=False)
+            shape=conversion.call_args[0][0].shape
+        self.assertEqual(shape[:2],(180,320))
+        self.assertIs(canvas.source,frame)
+        self.assertEqual(canvas.source.shape,(1080,1920,3))
+        item=canvas._image_item
+        canvas.display(frame,copy_image=False)
+        self.assertEqual(canvas._image_item,item)
+        self.assertEqual(len(canvas.find_all()),1)
+        self.assertEqual(canvas.image_point(160,90),(960,540))
+        canvas.destroy()
+
+    def test_video_paint_skips_duplicate_frames_and_caps_redraw_frequency(self):
+        frame=images()[1]
+        self.app.video_paints.clear()
+        with patch('poka_yoke_mejorado5.time.monotonic',return_value=1000.) as clock:
+            with patch.object(self.app.video,'display',wraps=self.app.video.display) as display:
+                self.app._paint_video(self.app.video,frame,1)
+                self.app._paint_video(self.app.video,frame,1)
+                self.app._paint_video(self.app.video,frame,2)
+                self.assertEqual(display.call_count,1)
+                clock.return_value=1000.051
+                self.app._paint_video(self.app.video,frame,2)
+                self.assertEqual(display.call_count,2)
 
     def test_history_can_open_original_and_export_filtered_records(self):
         m=make_model(self.app.store)

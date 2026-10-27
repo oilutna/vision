@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Poka-Yoke 5.5.0 — interfaz industrial con CustomTkinter, archivo único.
+"""Poka-Yoke 5.5.1 — interfaz industrial con CustomTkinter, archivo único.
 
 Ejecutar: python poka_yoke_mejorado5.py
 Dependencias: python -m pip install numpy opencv-python Pillow customtkinter
@@ -1290,9 +1290,15 @@ class Camera:
         self.commands.put((generation, copy.deepcopy(settings)))
         return generation
 
-    def snapshot(self):
+    def snapshot(self,previous_stamp=None,previous_frame=None):
         with self.lock:
-            frame = None if self.frame is None else self.frame.copy()
+            if self.frame is None:
+                frame = None
+            elif previous_frame is not None and previous_stamp == self.timestamp:
+                # Reutiliza sólo la copia privada del consumidor, nunca el buffer de captura.
+                frame = previous_frame
+            else:
+                frame = self.frame.copy()
             return frame, self.timestamp, copy.deepcopy(self.info)
 
     def _publish(self, generation, frame=None, **info):
@@ -1453,7 +1459,10 @@ UI_FONT = 'Segoe UI' if os.name == 'nt' else 'DejaVu Sans'
 
 
 class ImageCanvas(tk.Canvas):
-    def __init__(self, parent, empty_text='Sin imagen de cámara', **kw):
+    def __init__(self, parent, empty_text='Sin imagen de cámara', video=False, **kw):
+        self.video = video
+        self._image_item = None
+        self._empty_item = None
         super().__init__(parent, bg='#0a111d', highlightthickness=0, **kw)
         self.empty_text = empty_text
         self.source = None
@@ -1461,26 +1470,41 @@ class ImageCanvas(tk.Canvas):
         self.offset = (0,0)
         self.bind('<Configure>', lambda e: self.redraw())
 
-    def display(self, image):
-        self.source = None if image is None else image.copy()
+    def display(self, image, copy_image=True):
+        if image is None and self.source is None and self._empty_item is not None:
+            return
+        self.source = None if image is None else (image.copy() if copy_image else image)
         self.redraw()
 
     def redraw(self):
-        self.delete('all')
         if self.source is None:
-            self.create_text(max(100,self.winfo_width()/2), max(80,self.winfo_height()/2),
+            self.delete('all')
+            self._image_item = None
+            self._empty_item = self.create_text(max(100,self.winfo_width()/2), max(80,self.winfo_height()/2),
                              text=self.empty_text, fill='#91a1b9', font=(UI_FONT,14))
             return
+        if self._empty_item is not None:
+            self.delete(self._empty_item)
+            self._empty_item = None
         h,w = self.source.shape[:2]
         cw,ch = max(10,self.winfo_width()),max(10,self.winfo_height())
-        s = min(cw/w,ch/h)
-        nw,nh = max(1,int(w*s)),max(1,int(h*s))
-        self.scale_factor = s
+        scale = min(cw/w,ch/h)
+        nw,nh = max(1,int(w*scale)),max(1,int(h*scale))
+        self.scale_factor = scale
         self.offset = ((cw-nw)//2,(ch-nh)//2)
-        rgb = cv2.cvtColor(self.source, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(rgb).resize((nw,nh),Image.Resampling.LANCZOS)
+        if self.video:
+            # Sólo se reduce la vista previa. La inspección conserva el cuadro original.
+            small = cv2.resize(self.source,(nw,nh),interpolation=cv2.INTER_LINEAR)
+            image = Image.fromarray(cv2.cvtColor(small,cv2.COLOR_BGR2RGB))
+        else:
+            rgb = cv2.cvtColor(self.source,cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(rgb).resize((nw,nh),Image.Resampling.LANCZOS)
         self.photo = ImageTk.PhotoImage(image)
-        self.create_image(*self.offset, image=self.photo, anchor='nw')
+        if self._image_item is None:
+            self._image_item = self.create_image(*self.offset,image=self.photo,anchor='nw')
+        else:
+            self.coords(self._image_item,*self.offset)
+            self.itemconfigure(self._image_item,image=self.photo)
 
     def image_point(self, x, y):
         if self.source is None:
@@ -1904,6 +1928,11 @@ class Application:
         self.camera = camera or Camera()
         self.executor = ThreadPoolExecutor(max_workers=1,thread_name_prefix='motor-pokayoke')
         self.task = None
+        self.task_locks_admin = False
+        self.production_progress = queue.Queue()
+        self.production_preview = None
+        self.video_paints = {}
+        self.preview_frame,self.preview_stamp = None,None
         self.closed = False
         self.admin_mode = False
         self.model = self.draft = None
@@ -1927,7 +1956,7 @@ class Application:
         self.live_output = None
         self.live_last_stamp = 0.
         ctk.set_appearance_mode('dark')
-        self.root.title('Poka-Yoke 5.5 · Inspección industrial')
+        self.root.title('Poka-Yoke 5.5.1 · Inspección industrial')
         width = min(1440,max(800,self.root.winfo_screenwidth()-40))
         height = min(900,max(600,self.root.winfo_screenheight()-60))
         # CTk recibe unidades lógicas; winfo_screen* devuelve píxeles físicos.
@@ -2038,7 +2067,7 @@ class Application:
         main.grid_columnconfigure(0,weight=1)
         main.grid_columnconfigure(1,minsize=270)
         main.grid_rowconfigure(0,weight=1)
-        self.video = ImageCanvas(main,width=640,height=280)
+        self.video = ImageCanvas(main,width=640,height=280,video=True)
         self.video.grid(row=0,column=0,sticky='nsew',padx=4,pady=4)
         side = ttk.Frame(main,padding=10,width=270)
         side.grid(row=0,column=1,sticky='nsew',padx=(0,4),pady=4)
@@ -2220,7 +2249,7 @@ class Application:
         preview.grid_propagate(False)
         preview.columnconfigure(0,weight=1)
         preview.rowconfigure(0,weight=1)
-        self.admin_video = ImageCanvas(preview,width=600,height=120)
+        self.admin_video = ImageCanvas(preview,width=600,height=120,video=True)
         self.admin_video.grid(row=0,column=0,sticky='nsew')
         row = ActionBar(preview)
         row.grid(row=1,column=0,sticky='ew',pady=(3,0))
@@ -2897,6 +2926,7 @@ class Application:
             raise RuntimeError('Hay una operación en curso; espera a que termine.')
         self.stop_live_test()
         self.message.set(text)
+        self.task_locks_admin = True
         self.task = (self.executor.submit(work),done)
         self._set_admin_editable(False)
 
@@ -3753,6 +3783,7 @@ class Application:
         if not self.live_running or generation != self.live_generation:
             return
         self.live_output = out
+        self.live_output_stamp = self.live_last_stamp
         result = out['result']
         label = 'SIN EVALUACIÓN' if not result else ('OK' if result['ok'] else 'NG')
         zones = '' if not result else ' · '.join(f"{z['name']}: {'OK' if z['ok'] else 'DIFERENCIA'}" for z in result['zonas'])
@@ -3892,6 +3923,7 @@ class Application:
         self.stop_live_test()
         was_running = self.running or getattr(self,'pending_start',False)
         self.running = self.pending_start = False
+        self.production_preview = None
         self.start_button.configure(text='Iniciar inspección')
         self._context_enabled(True)
         self._clear_result('Inspección pausada')
@@ -3953,45 +3985,78 @@ class Application:
         for r in self.store.events(model_id=self.active_model['id'],lot=self.lot.get() or None,kind='production',limit=20):
             self.recent.insert('','end',iid=r['id'],values=(r['timestamp'][11:19],r['part'],r['lot'],r['outcome'],r['version']))
 
+    def _video_due(self,canvas,token):
+        previous = self.video_paints.get(canvas)
+        return previous is None or (previous[1] != token and time.monotonic()-previous[0]>=.05)
+
+    def _paint_video(self,canvas,image,token,force=False):
+        if image is None:
+            self.video_paints.pop(canvas,None)
+            canvas.display(None)
+            return
+        if force or self._video_due(canvas,token):
+            # snapshot() y el motor entregan buffers propios que se tratan como inmutables.
+            canvas.display(image,copy_image=False)
+            self.video_paints[canvas] = (time.monotonic(),token)
+
+    def _alert_ng(self):
+        try:
+            import winsound
+            threading.Thread(target=winsound.Beep,args=(2500,200),daemon=True).start()
+        except ImportError:
+            self.root.bell()
+
     def _display_output(self,out):
         if not self.running:
             self._refresh_counts()
             self._refresh_recent()
             return
-        self.video.display(out['annotated'])
-        self.cycle_status.set(out['state']+f" · coincidencia {out['match']:.2f}")
+        stamp = out.get('frame_stamp',time.monotonic())
+        self.production_preview = (stamp,out['annotated'])
+        if out.get('record_pending') or time.monotonic()-stamp<=.2:
+            self._paint_video(self.video,out['annotated'],('result',stamp),force=bool(out.get('record_pending')))
+        detail = out['state']+f" · coincidencia {out['match']:.2f}"
+        if self.cycle_status.get() != detail:
+            self.cycle_status.set(detail)
         result = out['result']
         if result:
-            self.result_label.configure(text='OK' if result['ok'] else 'NG',style='Result.TLabel',foreground='#35e0b5' if result['ok'] else '#ff6b7b')
-            self.zone_results.configure(text='')
+            text = 'OK' if result['ok'] else 'NG'
+            if self.result_label.cget('text') != text:
+                self.result_label.configure(text=text,style='Result.TLabel',foreground='#35e0b5' if result['ok'] else '#ff6b7b')
             self.zone_readout.display(result)
         else:
-            self.result_label.configure(text='SIN EVALUACIÓN',style='Neutral.Result.TLabel',foreground='#a6b6cb')
-            self.zone_results.configure(text='')
+            if self.result_label.cget('text') != 'SIN EVALUACIÓN':
+                self.result_label.configure(text='SIN EVALUACIÓN',style='Neutral.Result.TLabel',foreground='#a6b6cb')
             self.zone_readout.display(None)
         phase,color = production_phase(out['state'])
-        self.phase_label.configure(text=phase,text_color=color)
+        if self.phase_label.cget('text') != phase:
+            self.phase_label.configure(text=phase,text_color=color)
+        if phase == 'ESPERANDO PIEZA' and self.message.get().startswith('Inspección registrada'):
+            self.message.set('Inspección activa · esperando la siguiente pieza.')
+        if out.get('record_pending'):
+            self.message.set('Resultado emitido · guardando registro de inspección…')
+            if result and not result['ok']:
+                self._alert_ng()
         if out.get('record'):
             self.last_event = out['record']
             self._refresh_counts()
             self._refresh_recent()
-            if not out['result']['ok']:
-                try:
-                    import winsound
-                    self.executor.submit(winsound.Beep,2500,200)
-                except ImportError:
-                    self.root.bell()
+            self.message.set('Inspección registrada · retira la pieza para continuar.')
 
     def _poll(self):
         if self.closed:
             return
         try:
             self._consume_live_test()
+            while not self.production_progress.empty():
+                self._display_output(self.production_progress.get_nowait())
             if self.task is not None:
                 future,done = self.task
                 if future.done():
                     self.task = None
-                    self._set_admin_editable(True)
+                    if self.task_locks_admin:
+                        self.task_locks_admin = False
+                        self._set_admin_editable(True)
                     try:
                         value = future.result()
                         done(value)
@@ -4001,7 +4066,11 @@ class Application:
                         self.stop_live_test('No se pudo iniciar la operación. Revisa las fotos y la configuración.')
                         self.message.set('Operación no completada: '+str(e))
                         messagebox.showerror('Operación no completada',str(e),parent=self.root)
-            frame,stamp,info = self.camera.snapshot()
+            if isinstance(self.camera,Camera):
+                frame,stamp,info = self.camera.snapshot(self.preview_stamp,self.preview_frame)
+                self.preview_frame,self.preview_stamp = frame,stamp
+            else:
+                frame,stamp,info = self.camera.snapshot()
             self.camera_status.set(info['status'])
             if self.admin_mode and time.monotonic() >= getattr(self,'guide_next_refresh',0):
                 self.guide_next_refresh = time.monotonic()+.5
@@ -4027,25 +4096,27 @@ class Application:
                         self.executor.submit(self.cycle.disconnected)
                     self.message.set('Inspección detenida: no hay imagen reciente. Revisa cámara y vuelve a iniciar.')
                     self.phase_label.configure(text='SIN CÁMARA',text_color='#ff6b7b')
-                self.video.display(None)
-                self.admin_video.display(None)
+                self._paint_video(self.video,None,None)
+                self._paint_video(self.admin_video,None,None)
             elif self.admin_mode:
                 if self.live_running:
                     if self.live_future is None and self.task is None and stamp != self.live_last_stamp:
                         self.live_last_stamp = stamp
                         cycle = self.live_cycle
                         self.live_future = (self.executor.submit(cycle.process,frame,stamp),self.live_generation)
-                    self.admin_video.display(self.live_output['annotated'] if self.live_output else frame)
-                elif time.monotonic() >= getattr(self,'preview_hold_until',0):
-                    preview = frame.copy()
+                    recent = self.live_output and time.monotonic()-self.live_output_stamp <= .2
+                    image = self.live_output['annotated'] if recent else frame
+                    token = ('live',self.live_output_stamp) if recent else stamp
+                    self._paint_video(self.admin_video,image,token)
+                elif time.monotonic() >= getattr(self,'preview_hold_until',0) and self._video_due(self.admin_video,stamp):
                     try:
-                        preview = cv2.convertScaleAbs(preview,alpha=float(self.fields['contrast'].get())/100.,beta=float(self.fields['brightness'].get()))
+                        preview = cv2.convertScaleAbs(frame,alpha=float(self.fields['contrast'].get())/100.,beta=float(self.fields['brightness'].get()))
                     except ValueError:
-                        pass
+                        preview = frame.copy()
                     if self.draft and self.draft['roi']:
                         x1,y1,x2,y2 = self.draft['roi']
                         cv2.rectangle(preview,(x1,y1),(x2,y2),(255,220,40),2)
-                    self.admin_video.display(preview)
+                    self._paint_video(self.admin_video,preview,stamp)
             elif self.running:
                 if self.task is None and stamp != self.last_stamp:
                     self.last_stamp = stamp
@@ -4053,19 +4124,26 @@ class Application:
                     context = copy.deepcopy(self.production_context)
                     def work(frame=frame,stamp=stamp,cycle=cycle,m=m,context=context):
                         out = cycle.process(frame,stamp)
+                        out['frame_stamp'] = stamp
                         if out['event']:
+                            self.production_progress.put(dict(out,record_pending=True))
                             out['record'] = self.store.record(m,out['event'],image=frame,annotated=out['annotated'],**context)
                         return out
+                    self.task_locks_admin = False
                     self.task = (self.executor.submit(work),self._display_output)
+                recent = self.production_preview and time.monotonic()-self.production_preview[0] <= .2
+                image = self.production_preview[1] if recent else frame
+                token = ('result',self.production_preview[0]) if recent else stamp
+                self._paint_video(self.video,image,token)
             else:
-                self.video.display(frame)
+                self._paint_video(self.video,frame,stamp)
         except Exception as e:
             self.pause()
             self.message.set('Error de operación: '+str(e))
             traceback.print_exc()
         finally:
             if not self.closed:
-                self.poll_id = self.root.after(70,self._poll)
+                self.poll_id = self.root.after(15,self._poll)
 
     def _event_by_id(self,eid):
         with self.store.connect() as db:
@@ -4205,7 +4283,7 @@ def main():
     parser = argparse.ArgumentParser(description='Poka-Yoke 5 · Administración e inspección local')
     parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parent/'datos',
                         help='Ubicación de modelos, contraseña y registros; por defecto datos junto al programa')
-    parser.add_argument('--version',action='version',version='Poka-Yoke 5.5.0')
+    parser.add_argument('--version',action='version',version='Poka-Yoke 5.5.1')
     args = parser.parse_args()
     try:
         import tkinter as tk

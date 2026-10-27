@@ -1,6 +1,6 @@
 # Poka-Yoke 5
 
-Versión **5.5.0**. Aplicación local de inspección visual para ensambles, con interfaz industrial oscura en **CustomTkinter** y modos de Administración e Inspección separados. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.5.1**. Aplicación local de inspección visual para ensambles, con interfaz industrial oscura en **CustomTkinter** y modos de Administración e Inspección separados. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
 
 ## Ejecutar
 
@@ -28,6 +28,16 @@ La cámara permanece visible sobre las pestañas OK, NG y Comprobación. Las min
 ![Inspección con cámara, resultado y controles](docs/interfaz_industrial_inspeccion.png)
 
 Capturas de la aplicación con cámara e imágenes sintéticas. El rediseño conserva modelos, fotos, configuraciones, contraseña, historial y criterios de evaluación de la versión anterior.
+
+## Fluidez de cámara e inspección
+
+La versión 5.5.1 elimina la reconfiguración del panel administrativo después de cada cuadro de producción. Revisa tareas y cuadros nuevos cada 15 ms; la vista de cámara se dibuja hasta 20 veces por segundo y continúa actualizándose mientras se calcula o guarda una inspección. Los cuadros de cámara se copian cuando hay uno nuevo.
+
+La vista previa se reduce al tamaño de pantalla antes de convertirla para Tk y reutiliza su elemento de imagen. **El motor sigue recibiendo el cuadro original a resolución completa**, con los mismos umbrales, seis cuadros de estabilización y ocho de promedio.
+
+OK/NG puede mostrarse mientras se guardan las imágenes del evento. El mensaje **guardando registro** indica que el contador todavía está pendiente; se actualiza una sola vez al confirmar el registro. El cierre del programa conserva la comprobación de operaciones pendientes. El sonido NG se emite sin bloquear el hilo del motor.
+
+En una prueba sintética con cámara simulada de 30 FPS, la mediana hasta ver el resultado pasó de **1,38 s a 0,48 s**. El dibujo de una vista previa FHD pasó de **22,8 ms a 3,0 ms** en el entorno de prueba. Son mediciones de nube, no de una cámara física ni de la computadora del usuario. [Método y resultados](docs/rendimiento_5_5_1.md).
 
 ## Preparación guiada y diagnóstico
 
@@ -146,7 +156,7 @@ La carpeta de datos está excluida de Git. Para respaldar todo, cierra el progra
 
 ## Verificación y límites
 
-Esta versión pasó **96 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores, diagnósticos por foto, comparación con el patrón OK, guía de preparación, controles numéricos, deshacer fotos sin perder otros ajustes, estados de producción, compatibilidad del historial anterior, pruebas en vivo sin habilitación y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. Las pruebas de distribución comprueban límites y acceso a botones a **1000 × 680, 1280 × 720 y 1440 × 900**, barras con varias filas y escalado de controles al 125 %. No se verificó una cámara física ni su controlador de Windows.
+Esta versión pasó **102 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores, diagnósticos por foto, comparación con el patrón OK, guía de preparación, controles numéricos, deshacer fotos sin perder otros ajustes, estados de producción, compatibilidad del historial anterior, pruebas en vivo sin habilitación y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. También se verifican cámara y resultado durante un guardado lento, una sola inspección por pieza, vista previa durante un cálculo bloqueado y conservación de la resolución original. Las pruebas de distribución comprueban límites y acceso a botones a **1000 × 680, 1280 × 720 y 1440 × 900**, barras con varias filas y escalado de controles al 125 %. No se verificó una cámara física ni su controlador de Windows.
 
 Comprueba en tu equipo enfoque, iluminación, resolución, velocidad y resultados con piezas reales. La presencia y el retiro se estiman visualmente; no hay un sensor físico de presencia. El motor indica diferencias por zona, sin diagnosticar automáticamente el tipo de defecto.
 

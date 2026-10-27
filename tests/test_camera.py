@@ -35,6 +35,29 @@ class CameraTests(unittest.TestCase):
             if predicate(value):return value
             time.sleep(.01)
         self.fail('La cámara simulada no completó la operación.')
+    def test_snapshot_reuses_only_the_consumers_copy_and_clears_on_disconnect(self):
+        camera=Camera.__new__(Camera)
+        camera.lock=threading.Lock()
+        camera.frame=np.full((200,240,3),42,np.uint8)
+        camera.timestamp=12.
+        camera.info={'ready':True,'generation':1}
+        first,stamp,_=camera.snapshot()
+        self.assertFalse(np.shares_memory(first,camera.frame))
+        reused,_,_=camera.snapshot(stamp,first)
+        self.assertIs(reused,first)
+        ordinary,_,_=camera.snapshot()
+        self.assertIsNot(ordinary,first)
+        self.assertFalse(np.shares_memory(ordinary,camera.frame))
+        camera.frame=np.full((200,240,3),75,np.uint8);camera.timestamp=13.
+        newer,new_stamp,_=camera.snapshot(stamp,first)
+        self.assertIsNot(newer,first)
+        self.assertEqual(new_stamp,13.)
+        self.assertTrue(np.all(newer==75))
+        camera.frame=None;camera.info['ready']=False
+        missing,_,info=camera.snapshot(new_stamp,newer)
+        self.assertIsNone(missing)
+        self.assertFalse(info['ready'])
+
     def test_capture_resolution_and_release_on_close(self):
         cap=Capture()
         with patch('poka_yoke_mejorado5.cv2.VideoCapture',return_value=cap):
