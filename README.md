@@ -10,7 +10,9 @@ Si cambia la referencia o la decisión de una zona durante la acumulación tempo
 
 **Actualización:** conserva la carpeta `datos` y sustituye el Python. Las aprobaciones anteriores quedan pendientes por el cambio de motor; repite Comprobar 10 OK + 10 NG y Habilitar inspección. No necesitas recapturar imágenes utilizables. Revisa de nuevo sensibilidad y defectos mínimos detectables con piezas físicas. El software no recupera detalles ausentes en fotografías borrosas.
 
-Validación de esta corrección: 8 regresiones nuevas y 26 pruebas originales enfocadas aprobadas; no se declara nuevamente aprobada la suite gráfica completa. Las mediciones de rendimiento publicadas para el motor anterior no caracterizan esta nueva comparación con múltiples referencias. [Detalles del motor y límites](docs/motor_referencias_completas.md).
+El motor **complete-reference-engine-2** corrige la alineación con cada referencia nativa y calibra pequeñas variaciones entre capturas OK completas, con un límite de calibración del 1% de área por zona antes de aplicar los factores existentes. Las NG no entrenan el patrón. [Corrección de calibración y límites](docs/calibracion_motor_2.md).
+
+Validación de esta corrección: 10 regresiones nuevas y 26 pruebas originales enfocadas aprobadas; no se declara nuevamente aprobada la suite gráfica completa. Las mediciones de rendimiento publicadas para el motor anterior no caracterizan esta nueva comparación con múltiples referencias. [Detalles del motor y límites](docs/motor_referencias_completas.md).
 
 ## Ejecutar
 
@@ -166,7 +168,7 @@ La carpeta de datos está excluida de Git. Para respaldar todo, cierra el progra
 
 ## Verificación y límites
 
-Esta versión pasó **102 pruebas automatizadas**, incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores, diagnósticos por foto, comparación con el patrón OK, guía de preparación, controles numéricos, deshacer fotos sin perder otros ajustes, estados de producción, compatibilidad del historial anterior, pruebas en vivo sin habilitación y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. También se verifican cámara y resultado durante un guardado lento, una sola inspección por pieza, vista previa durante un cálculo bloqueado y conservación de la resolución original. Las pruebas de distribución comprueban límites y acceso a botones a **1000 × 680, 1280 × 720 y 1440 × 900**, barras con varias filas y escalado de controles al 125 %. No se verificó una cámara física ni su controlador de Windows.
+La versión anterior del motor reportó **102 pruebas automatizadas**. Ese resultado no se atribuye a este motor v2, verificado con las 36 pruebas enfocadas indicadas arriba. La suite original incluye incluidas pruebas de interfaz con cámara simulada, persistencia de deslizadores, diagnósticos por foto, comparación con el patrón OK, guía de preparación, controles numéricos, deshacer fotos sin perder otros ajustes, estados de producción, compatibilidad del historial anterior, pruebas en vivo sin habilitación y el flujo completo con las mismas diez OK de referencia y diez NG usando el motor OpenCV sobre imágenes sintéticas. También se verifican cámara y resultado durante un guardado lento, una sola inspección por pieza, vista previa durante un cálculo bloqueado y conservación de la resolución original. Las pruebas de distribución comprueban límites y acceso a botones a **1000 × 680, 1280 × 720 y 1440 × 900**, barras con varias filas y escalado de controles al 125 %. No se verificó una cámara física ni su controlador de Windows.
 
 Comprueba en tu equipo enfoque, iluminación, resolución, velocidad y resultados con piezas reales. La presencia y el retiro se estiman visualmente; no hay un sensor físico de presencia. El motor indica diferencias por zona, sin diagnosticar automáticamente el tipo de defecto.
 

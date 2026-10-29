@@ -96,7 +96,7 @@ def defaults():
 
 def canonical(config):
     # No references to mutable image filenames: image assets are addressed by SHA256.
-    return hashlib.sha256(('complete-reference-engine-1:' + json.dumps(config, sort_keys=True, allow_nan=False,
+    return hashlib.sha256(('complete-reference-engine-2:' + json.dumps(config, sort_keys=True, allow_nan=False,
                                     separators=(',', ':'))).encode()).hexdigest()
 
 
@@ -1082,11 +1082,13 @@ class VisionEngine(OriginalVision):
                                             {'reference:0':'La foto no tiene contraste suficiente. Repite la captura con iluminación y enfoque adecuados.'})
         h, w = refs[0].shape[:2]
         aligned, bad = [refs[0]], []
+        to_base=[np.eye(2,3,dtype=np.float32)]
         for i, ref in enumerate(refs[1:], 2):
             matrix = self._alinear_a(base_L, cv2.cvtColor(ref, cv2.COLOR_BGR2LAB)[..., 0])
             if matrix is None:
                 bad.append(i)
             else:
+                to_base.append(matrix)
                 aligned.append(cv2.warpAffine(ref, matrix, (w, h), flags=cv2.INTER_LINEAR,
                                                borderMode=cv2.BORDER_REPLICATE))
         if bad:
@@ -1101,7 +1103,7 @@ class VisionEngine(OriginalVision):
         representative = int(max(eligible,key=lambda i:cv2.Laplacian(labs[i][...,0],cv2.CV_64F).var()))
         self.reference_caches=[]
         for i,(image,lab,measurement) in enumerate(zip(aligned,labs,smooth)):
-            gray = cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(refs[i],cv2.COLOR_BGR2GRAY)
             if gray.std()<1:
                 raise ReferencePreparationError('Una referencia no tiene textura suficiente.',
                     {f'reference:{i}':'Repite esta foto OK con textura y enfoque suficientes.'})
@@ -1114,7 +1116,8 @@ class VisionEngine(OriginalVision):
                        a_med=float(np.median(measurement[...,1])),b_med=float(np.median(measurement[...,2])),
                        a_std=float(measurement[...,1].std()),b_std=float(measurement[...,2].std()),
                        lim_zona={str(z):CAL_MIN_BLOB for z in range(1,c['zone_count']+1)},
-                       reference_index=i,reference_bgr=image.copy())
+                       reference_index=i,reference_bgr=image.copy(),to_base=to_base[i],
+                       native_L=cv2.GaussianBlur(cv2.cvtColor(refs[i],cv2.COLOR_BGR2LAB),(5,5),0)[...,0].astype(np.float32))
             self.reference_caches.append(cache)
         self.representative_index=representative
         self.pattern_cache=self.reference_caches[representative]
@@ -1122,6 +1125,38 @@ class VisionEngine(OriginalVision):
         self.aligned_references=len(aligned)
         self._candidates=[]
         self._last_alignment_valid=False
+        self._calibrate_capture_variation(refs)
+
+    def _calibrate_capture_variation(self, refs):
+        # Learn only small capture variation between close COMPLETE specimens.
+        # Distinct variants cannot inflate one another's tolerance; no NG used.
+        observations={i:[] for i in range(len(refs))}
+        for i,image in enumerate(refs):
+            gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
+            self._candidates=[(float(cv2.matchTemplate(gray,c['tpl_gray'],cv2.TM_CCOEFF_NORMED)[0,0]),c)
+                              for c in self.reference_caches if c['reference_index']!=i]
+            self._candidates=[(score,c) for score,c in self._candidates if score>=MATCH_OK]
+            if not self._candidates: continue
+            roi=cv2.GaussianBlur(cv2.cvtColor(image,cv2.COLOR_BGR2LAB),(5,5),0).astype(np.float32)
+            self._last_alignment_valid=True
+            result=self.evaluate_roi(roi,max(score for score,c in self._candidates))
+            if result is None: continue
+            # Every zone must be close, preventing variant hybrids from teaching noise.
+            if not all(z['pix']<=max(6,int((z['rect'][2]-z['rect'][0])*(z['rect'][3]-z['rect'][1])*.01)) for z in result['zonas']): continue
+            values=[z['pix'] for z in result['zonas']]
+            observations[i].append(values)
+            observations[result['reference_index']].append(values)
+        for cache in self.reference_caches:
+            values=observations[cache['reference_index']]
+            limits={}
+            for idx in range(1,self.config['zone_count']+1):
+                x,y,X,Y=self._rect_zona(self.zonas_relativas[str(idx)],cache['ancho'],cache['alto'])
+                cap=max(LIM_MIN_BLOB,int((X-x)*(Y-y)*.01))
+                noise=max((row[idx-1] for row in values),default=0)
+                limits[str(idx)]=min(cap,max(CAL_MIN_BLOB,int(noise*2)+8)) if noise else CAL_MIN_BLOB
+            cache['lim_zona']=limits
+        self.calibration_observations=observations
+        self.cache=self.pattern_cache;self._candidates=[];self._last_alignment_valid=False
 
     def adjust(self, frame):
         return cv2.convertScaleAbs(frame, alpha=self.config['contrast']/100., beta=self.config['brightness'])
@@ -1183,11 +1218,13 @@ class VisionEngine(OriginalVision):
         candidates=self._candidates or [(match,c) for c in self.reference_caches]
         results=[]
         for score,cache in candidates:
-            matrix=self._alinear_a(cache['media_L'],roi[...,0])
+            matrix=self._alinear_a(cache['native_L'],roi[...,0])
             if matrix is None or not np.isfinite(matrix).all(): continue
             angle=float(np.degrees(np.arctan2(matrix[1,0],matrix[0,0])))
             if abs(angle)>ECC_ROT_MAX or np.max(np.abs(matrix[:,2]))>ECC_DESP_MAX: continue
-            aligned=cv2.warpAffine(roi,matrix,(cache['ancho'],cache['alto']),
+            # Limit current-to-native motion; reference-to-canonical pose is known.
+            composed=(np.vstack([cache['to_base'],[0,0,1]]) @ np.vstack([matrix,[0,0,1]]))[:2].astype(np.float32)
+            aligned=cv2.warpAffine(roi,composed,(cache['ancho'],cache['alto']),
                                    flags=cv2.INTER_LINEAR,borderMode=cv2.BORDER_REPLICATE)
             normalized=self._normalizar_iluminacion(aligned,cache)
             result=self._evaluar_zonas(normalized,cache,self.config['zone_count'],self.config['tolerance'],score)
@@ -1196,7 +1233,7 @@ class VisionEngine(OriginalVision):
             result['adjustment']=(angle,float(matrix[0,2]),float(matrix[1,2]))
             result['reference_index']=cache['reference_index']
             result['reference_path']=self.config['references'][cache['reference_index']]['path']
-            result['engine']='complete-reference-engine-1'
+            result['engine']='complete-reference-engine-2'
             penalty=max(z['pix']/max(1,z['lim']) for z in result['zonas'])
             results.append((not result['ok'],penalty,-score,cache,result,normalized))
         if not results: return None

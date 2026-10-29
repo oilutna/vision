@@ -71,5 +71,18 @@ class MotorTests(unittest.TestCase):
         e=VisionEngine(self.s,self.m)
         self.assertTrue(np.array_equal(e.pattern_cache['reference_bgr'],self.obj))
         self.assertEqual(e.aligned_references,10)
+    def test_capture_calibration_is_bounded_per_zone(self):
+        self.versions(); e=VisionEngine(self.s,self.m)
+        for cache in e.reference_caches:
+            for i in range(1,e.config['zone_count']+1):
+                x,y,X,Y=e._rect_zona(e.zonas_relativas[str(i)],cache['ancho'],cache['alto'])
+                self.assertLessEqual(cache['lim_zona'][str(i)],max(6,int((X-x)*(Y-y)*.01)))
+    def test_ng_samples_do_not_train_capture_calibration(self):
+        from tests.helpers import add_samples
+        before=VisionEngine(self.s,self.m)
+        m=add_samples(self.s,self.m,truths=('NG',))
+        after=VisionEngine(self.s,m)
+        self.assertEqual([c['lim_zona'] for c in before.reference_caches],
+                         [c['lim_zona'] for c in after.reference_caches])
 
 if __name__=='__main__': unittest.main(verbosity=2)
