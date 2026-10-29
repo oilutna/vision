@@ -1384,6 +1384,7 @@ import cv2
 class Camera:
     def __init__(self):
         self.commands = queue.Queue()
+        self.discovery_results = queue.Queue()
         self.lock = threading.Lock()
         self.frame = None
         self.timestamp = 0.
@@ -1415,6 +1416,33 @@ class Camera:
             else:
                 frame = self.frame.copy()
             return frame, self.timestamp, copy.deepcopy(self.info)
+
+    def discover(self, settings):
+        """Scan on the capture worker, releasing the preview before opening devices."""
+        request = copy.deepcopy(settings)
+        request['_scan_indices'] = sorted(set(range(11)) | {settings['index']})
+        return self.configure(request)
+
+    def _discover(self, settings, indices, generation):
+        devices = []
+        for index in indices:
+            if self.stop_event.is_set() or generation != self.generation:
+                break
+            self._publish(generation, ready=False, status=f'Buscando cámaras · dispositivo {index}…')
+            probe = dict(settings, index=index, exposure=None, focus=None, white_balance=None)
+            cap = None
+            try:
+                cap, _ = self._open(probe)
+                h, w = self._first_frame.shape[:2]
+                devices.append({'index': index, 'width': w, 'height': h})
+            except Exception:
+                # Unavailable, busy or permission-blocked devices are not usable candidates.
+                pass
+            finally:
+                if cap is not None:
+                    cap.release()
+                self._first_frame = None
+        self.discovery_results.put((generation, devices))
 
     def _publish(self, generation, frame=None, **info):
         with self.lock:
@@ -1516,6 +1544,11 @@ class Camera:
                     if cap is not None:
                         cap.release()
                         cap = None
+                    indices = settings.pop('_scan_indices', None)
+                    if indices is not None:
+                        self._discover(settings, indices, generation)
+                        if self.stop_event.is_set() or generation != self.generation:
+                            continue
                     try:
                         cap, props = self._open(settings)
                     except Exception as e:
@@ -2223,6 +2256,22 @@ class Application:
             frame.pack(fill='both',expand=False)
 
     def _build_admin(self):
+        cameras = ttk.Frame(self.admin,padding=(8,4))
+        cameras.pack(fill='x')
+        cameras.columnconfigure(1,weight=1)
+        ttk.Label(cameras,text='Cámara de esta PC',style='Accent.TLabel').grid(row=0,column=0,sticky='w',padx=(0,8))
+        self.camera_choice = tk.StringVar(value='0')
+        self.camera_choices = ttk.Combobox(cameras,textvariable=self.camera_choice,
+                                           values=[str(i) for i in range(11)],width=24)
+        self.camera_choices.grid(row=0,column=1,sticky='ew')
+        camera_actions = ActionBar(cameras)
+        camera_actions.grid(row=0,column=2,sticky='e',padx=(8,0))
+        self.scan_camera_button = button(camera_actions,'Buscar cámaras USB / PC',self.find_cameras)
+        button(camera_actions,'Conectar seleccionada',self.connect_selected_camera,tone='primary')
+        self.camera_search_status = tk.StringVar(value='Selecciona un número o busca cámaras. El cambio se guarda con el modelo.')
+        ttk.Label(cameras,textvariable=self.camera_search_status,style='Muted.TLabel',wraplength=850).grid(
+            row=1,column=0,columnspan=3,sticky='w',pady=(3,0))
+        self.camera_scan_generation = None
         self.admin_tabs = TabPanel(self.admin)
         self.admin_tabs.pack(fill='both',expand=True)
         catalog = ttk.Frame(self.admin_tabs,padding=8)
@@ -2296,6 +2345,7 @@ class Application:
         camera = panels['Cámara']
         ttk.Label(camera,text='DISPOSITIVO Y RESOLUCIÓN',style='Accent.TLabel').pack(anchor='w',padx=6,pady=6)
         field(camera,'camera.index','Cámara',0,list(range(11)))
+        self.fields['camera.index'].trace_add('write',self._camera_field_changed)
         field(camera,'camera.width','Ancho (px)',1280)
         field(camera,'camera.height','Alto (px)',720)
         row = ActionBar(camera)
@@ -3444,6 +3494,73 @@ class Application:
         self._configure_preview(c['camera'],force=True)
         self.message.set('Abriendo cámara. Comprueba la resolución y los ajustes reales en el estado inferior.')
 
+    def _camera_field_changed(self,*args):
+        self.camera_choice.set(self.fields['camera.index'].get())
+
+    def _selected_camera_index(self):
+        try:
+            index = int(self.camera_choice.get().split(' · ',1)[0].strip())
+        except ValueError:
+            raise ValueError('Selecciona una cámara de la lista o escribe su número (0 a 20).') from None
+        if not 0 <= index <= 20:
+            raise ValueError('El número de cámara debe estar entre 0 y 20.')
+        return index
+
+    @admin_action
+    def find_cameras(self):
+        if self.camera_scan_generation is not None:
+            self.message.set('La búsqueda de cámaras sigue en curso.')
+            return
+        self.stop_live_test()
+        if self.running or getattr(self,'pending_start',False):
+            self.pause()
+        settings = copy.deepcopy(getattr(self,'camera_requested',None) or defaults()['camera'])
+        if self.model is not None:
+            settings = copy.deepcopy(self._sync()['camera'])
+        self.generation = self.camera.discover(settings)
+        self.camera_scan_generation = self.generation
+        self.camera_requested = settings
+        self.camera_search_status.set('Buscando cámaras 0–10 y la seleccionada. La vista previa se restablecerá al terminar.')
+        self.message.set('Buscando cámaras; la inspección permanece pausada.')
+
+    def _consume_camera_discovery(self):
+        results = getattr(self.camera,'discovery_results',None)
+        if results is None:
+            return
+        while True:
+            try:
+                generation, devices = results.get_nowait()
+            except queue.Empty:
+                break
+            if generation != self.camera_scan_generation:
+                continue
+            self.camera_scan_generation = None
+            if generation != self.generation:
+                self.camera_search_status.set('Búsqueda cancelada al cambiar la cámara. Puedes buscar de nuevo.')
+                continue
+            labels = [f"{d['index']} · {d['width']} × {d['height']} · imagen disponible" for d in devices]
+            # Keep manual selection available for a busy device or an index above 10.
+            self.camera_choices.configure(values=labels or [str(i) for i in range(11)])
+            count = len(devices)
+            self.camera_search_status.set(
+                f'{count} cámara(s) con imagen. Selecciona una y pulsa Conectar seleccionada. También puedes escribir 0–20.'
+                if count else 'Sin cámaras con imagen. Cierra otras aplicaciones y revisa conexión/permisos. Puedes escribir un número 0–20 y conectar.')
+
+    @admin_action
+    def connect_selected_camera(self):
+        index = self._selected_camera_index()
+        self.stop_live_test()
+        if self.running or getattr(self,'pending_start',False):
+            self.pause()
+        if self.model is not None:
+            self.fields['camera.index'].set(str(index))
+            settings = self._sync()['camera']
+        else:
+            settings = copy.deepcopy(getattr(self,'camera_requested',None) or defaults()['camera'])
+            settings['index'] = index
+        self._configure_preview(settings,force=True)
+        self.message.set(f'Abriendo cámara {index}. Verifica la imagen y guarda la configuración del modelo para conservarla.')
+
     def _configure_preview(self,settings,force=False):
         if self.closed:
             return
@@ -3451,6 +3568,9 @@ class Application:
         if (not force and getattr(self,'camera_requested',None) == settings
                 and (info.get('ready') or 'Abriendo' in info.get('status',''))):
             return
+        if getattr(self,'camera_scan_generation',None) is not None:
+            self.camera_scan_generation = None
+            self.camera_search_status.set('Búsqueda cancelada al cambiar la cámara. Puedes buscar de nuevo.')
         self.generation = self.camera.configure(settings)
         self.camera_requested = copy.deepcopy(settings)
         self.camera_status.set('Abriendo cámara…')
@@ -4164,6 +4284,7 @@ class Application:
         if self.closed:
             return
         try:
+            self._consume_camera_discovery()
             self._consume_live_test()
             while not self.production_progress.empty():
                 self._display_output(self.production_progress.get_nowait())

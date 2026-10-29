@@ -85,6 +85,18 @@ El número de parte permanece en la cabecera de operación, con un resultado OK/
 
 Las zonas muestran barras y mensajes como **Diferencia 48 / límite 30 px**, con la explicación de si exceden el límite. El área corresponde al mayor defecto conectado que calcula el motor; las barras no cambian los umbrales. Las mediciones y la referencia tienen desplazamiento para mantener los controles principales accesibles con cinco zonas.
 
+## Seleccionar una cámara USB o integrada
+
+Entra a **Administración**. En la barra **Cámara de esta PC**, disponible incluso sin abrir un modelo:
+
+1. Pulsa **Buscar cámaras USB / PC**. Se prueban los números 0–10 y el configurado actualmente; solo se listan dispositivos que entregan imagen, con su número y resolución real. La vista previa se interrumpe durante la búsqueda y después se intenta restablecer la cámara anterior. La búsqueda puede tardar según el controlador.
+2. Elige un resultado y pulsa **Conectar seleccionada**. También puedes escribir manualmente un número de 0 a 20 si el dispositivo está fuera de la búsqueda o estaba ocupado.
+3. Con un modelo abierto, pulsa **Guardar configuración** para conservar la cámara elegida para ese número de parte. Sin modelo, la elección se utiliza solo en la vista previa.
+
+El selector numérico original sigue en **Configurar modelo → Cámara**. Verifica la imagen después de cambiar de dispositivo; los índices de Windows pueden cambiar al reconectar cámaras. Si la lista queda vacía, cierra otras aplicaciones que usen la cámara y revisa la conexión y permisos de Windows. La detección usa OpenCV y no requiere dependencias nuevas. Cada cámara se identifica por número y resolución, sin asumir el nombre comercial del dispositivo.
+
+La búsqueda y el cambio de dispositivo pausan las pruebas en vivo y la inspección. No modifican las referencias ni la resolución configurada. Una cámara que entregue otra resolución requiere revisar la receta y su calibración antes de inspeccionar. Cinco nuevas pruebas de descubrimiento y selector, incluidas pruebas de interfaz y persistencia, y las ocho pruebas anteriores de cámara pasaron con dispositivos simulados en Windows; no se ha validado aquí la nueva cámara USB física del usuario.
+
 ## Cámara
 
 La cámara se abre automáticamente al iniciar, aunque no haya un modelo registrado. El botón **Reconectar cámara** está visible en la parte superior. La vista previa no inicia la inspección ni incrementa contadores.
