@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Poka-Yoke 5.5.1 — interfaz industrial con CustomTkinter, archivo único.
+"""Poka-Yoke 5.5.2 · 2026-10-28 — interfaz industrial con CustomTkinter, archivo único.
 
 Ejecutar: python poka_yoke_mejorado5.py
 Dependencias: python -m pip install numpy opencv-python Pillow customtkinter
@@ -2106,7 +2106,7 @@ class Application:
         self.live_output = None
         self.live_last_stamp = 0.
         ctk.set_appearance_mode('dark')
-        self.root.title('Poka-Yoke 5.5.1 · Inspección industrial')
+        self.root.title('Poka-Yoke 5.5.2 · Inspección industrial')
         width = min(1440,max(800,self.root.winfo_screenwidth()-40))
         height = min(900,max(600,self.root.winfo_screenheight()-60))
         # CTk recibe unidades lógicas; winfo_screen* devuelve píxeles físicos.

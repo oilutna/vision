@@ -1,6 +1,8 @@
 # Poka-Yoke 5
 
-Versión **5.5.1**. Aplicación local de inspección visual para ensambles, con interfaz industrial oscura en **CustomTkinter** y modos de Administración e Inspección separados. El motor de comparación incorpora referencias completas independientes; consulta la sección siguiente. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+Versión **5.5.2**. Aplicación local de inspección visual para ensambles, con interfaz industrial oscura en **CustomTkinter** y modos de Administración e Inspección separados. El motor de comparación incorpora referencias completas independientes; consulta la sección siguiente. Todo el programa está en **poka_yoke_mejorado5.py**, sin módulos propios adicionales.
+
+La tercera línea de `poka_yoke_mejorado5.py` identifica la versión y fecha de actualización. En cada nueva actualización del programa se incrementa esa versión y se mantienen sincronizados el título de la ventana y la versión de este README.
 
 ## Motor: referencia real y versiones completas
 
